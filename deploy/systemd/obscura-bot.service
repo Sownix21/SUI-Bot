@@ -10,6 +10,8 @@ Group=obscura-bot
 WorkingDirectory=/var/lib/obscura-bot
 EnvironmentFile=/etc/obscura-bot/obscura-bot.env
 Environment=PYTHONUNBUFFERED=1
+Environment=BOT_LOG_FILE=
+Environment=DATA_DIR=/var/lib/obscura-bot
 ExecStart=/opt/obscura-bot/.venv/bin/python -m obscura_bot
 Restart=on-failure
 RestartSec=5s

@@ -43,22 +43,41 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-file_handler = RotatingFileHandler('bot.log', maxBytes=5*1024*1024, backupCount=3)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
+bot_log_file = os.getenv("BOT_LOG_FILE", "bot.log").strip()
+if bot_log_file:
+    try:
+        file_handler = RotatingFileHandler(bot_log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+    except OSError as exc:
+        # Journald still receives stdout/stderr under systemd; a logfile must
+        # never prevent the bot from starting.
+        logger.warning("File logging disabled because %s could not be opened: %s", bot_log_file, exc)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
+
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+
+
+def managed_data_path(value: str) -> str:
+    path = Path(value)
+    if path.is_absolute() or not DATA_DIR:
+        return str(path)
+    return str(Path(DATA_DIR) / path)
+
+
 SETTINGS = Settings.from_env()
-RUNTIME_SETTINGS = load_runtime_settings()
+RUNTIME_SETTINGS_FILE = managed_data_path("runtime_settings.json")
+RUNTIME_SETTINGS = load_runtime_settings(RUNTIME_SETTINGS_FILE)
 SUI_HOST = validate_service_url(SETTINGS.sui_host, allow_insecure_http=SETTINGS.allow_insecure_http)
 SUI_TOKEN = SETTINGS.sui_token
 BOT_TOKEN = SETTINGS.bot_token
 ADMIN_TELEGRAM_ID = SETTINGS.admin_telegram_id
 ADMIN_CLIENT_ID = SETTINGS.admin_client_id
-BACKUP_DIR = SETTINGS.backup_dir
+BACKUP_DIR = managed_data_path(SETTINGS.backup_dir)
 DB_NAME = SETTINGS.db_name
 BACKUP_MAX_BYTES = SETTINGS.backup_max_bytes
 RATE_LIMIT_WINDOW = SETTINGS.rate_limit_window
@@ -69,11 +88,11 @@ REDIS_HOST = SETTINGS.redis_host
 REDIS_PORT = SETTINGS.redis_port
 REDIS_DB = SETTINGS.redis_db
 ITEMS_PER_PAGE = SETTINGS.items_per_page
-SUB_CACHE_FILE = SETTINGS.sub_cache_file
+SUB_CACHE_FILE = managed_data_path(SETTINGS.sub_cache_file)
 SUB_CACHE_DURATION = SETTINGS.sub_cache_duration
 FALLBACK_SUB_URI = SETTINGS.fallback_sub_uri
-ASSIGNMENTS_FILE = SETTINGS.assignments_file
-METRICS_FILE = SETTINGS.metrics_file
+ASSIGNMENTS_FILE = managed_data_path(SETTINGS.assignments_file)
+METRICS_FILE = managed_data_path(SETTINGS.metrics_file)
 REMINDER_DAYS = [1, 3, 5]
 REMINDER_COOLDOWN = SETTINGS.reminder_cooldown
 RENEWAL_MONTHLY_PRICE = int(RUNTIME_SETTINGS.get("RENEWAL_MONTHLY_PRICE", SETTINGS.renewal_monthly_price))
@@ -82,7 +101,7 @@ PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.p
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
 
 # Inbounds cache constants
-INBOUNDS_CACHE_FILE = "inbounds_cache.json"
+INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
 INBOUNDS_CACHE_DURATION = 24 * 60 * 60  # 24 hours
 
 # Alert system constants
@@ -617,19 +636,35 @@ def load_assignments():
             with io_lock:
                 with open(ASSIGNMENTS_FILE, "r") as f:
                     data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get("telegram_clients"), dict):
+                    # Accept an older wrapped export format as well as the
+                    # current plain Telegram-ID mapping.
+                    data = data["telegram_clients"]
+                if not isinstance(data, dict):
+                    raise ValueError("assignments file must contain a JSON object")
                 telegram_clients = {}
                 for k, v in data.items():
                     tg_id = int(k)
-                    # Handle both old format (single ID) and new format (list)
-                    if isinstance(v, list):
-                        telegram_clients[tg_id] = v
-                    else:
-                        telegram_clients[tg_id] = [v]
-                logger.info(f"Loaded {len(telegram_clients)} assignments")
+                    raw_client_ids = v if isinstance(v, list) else [v]
+                    client_ids = []
+                    for raw_client_id in raw_client_ids:
+                        client_id = int(raw_client_id)
+                        if client_id > 0 and client_id not in client_ids:
+                            client_ids.append(client_id)
+                    if tg_id > 0 and client_ids:
+                        telegram_clients[tg_id] = client_ids
+                total_links = sum(len(client_ids) for client_ids in telegram_clients.values())
+                logger.info(
+                    "Loaded %s Telegram assignment(s) and %s client link(s) from %s",
+                    len(telegram_clients),
+                    total_links,
+                    ASSIGNMENTS_FILE,
+                )
         except Exception as e:
-            logger.error(f"Failed to load assignments: {e}")
+            logger.error("Failed to load assignments from %s: %s", ASSIGNMENTS_FILE, e)
             telegram_clients = {ADMIN_TELEGRAM_ID: [ADMIN_CLIENT_ID]}
     else:
+        logger.warning("Assignments file not found at %s; using admin default", ASSIGNMENTS_FILE)
         telegram_clients = {ADMIN_TELEGRAM_ID: [ADMIN_CLIENT_ID]}
 
 def save_assignments():
@@ -930,7 +965,7 @@ def get_renewal_month_options() -> List[int]:
 def set_renewal_month_options(new_options: List[int]) -> List[int]:
     global renewal_month_options
     renewal_month_options = parse_renewal_month_options(",".join(map(str, new_options)))
-    save_runtime_setting("RENEWAL_MONTH_OPTIONS", ",".join(map(str, renewal_month_options)))
+    save_runtime_setting("RENEWAL_MONTH_OPTIONS", ",".join(map(str, renewal_month_options)), RUNTIME_SETTINGS_FILE)
     return renewal_month_options
 
 def cleanup_pending_renew_requests():
@@ -1032,7 +1067,7 @@ async def settings_card_number_input(update: Update, context: ContextTypes.DEFAU
         return SETTINGS_CARD_NUMBER
 
     PAYMENT_CARD_NUMBER = value
-    save_runtime_setting("PAYMENT_CARD_NUMBER", PAYMENT_CARD_NUMBER)
+    save_runtime_setting("PAYMENT_CARD_NUMBER", PAYMENT_CARD_NUMBER, RUNTIME_SETTINGS_FILE)
     await update.message.reply_text(
         f"✅ Card number updated to:\n`{PAYMENT_CARD_NUMBER}`",
         parse_mode='Markdown',
@@ -1053,7 +1088,7 @@ async def settings_card_holder_input(update: Update, context: ContextTypes.DEFAU
         return SETTINGS_CARD_HOLDER
 
     PAYMENT_CARD_HOLDER = value
-    save_runtime_setting("PAYMENT_CARD_HOLDER", PAYMENT_CARD_HOLDER)
+    save_runtime_setting("PAYMENT_CARD_HOLDER", PAYMENT_CARD_HOLDER, RUNTIME_SETTINGS_FILE)
     holder_text = PAYMENT_CARD_HOLDER if PAYMENT_CARD_HOLDER else "(empty)"
     await update.message.reply_text(
         f"✅ Card holder updated:\n`{md_escape(holder_text)}`",
@@ -2137,7 +2172,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ Invalid price action.", show_alert=True)
                 return
             RENEWAL_MONTHLY_PRICE = new_price
-            save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(RENEWAL_MONTHLY_PRICE))
+            save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(RENEWAL_MONTHLY_PRICE), RUNTIME_SETTINGS_FILE)
             await query.edit_message_text(
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
@@ -3497,7 +3532,7 @@ async def daily_subscription_reminder(app):
 
 async def monitor_expired_subscriptions(app):
     """Continuously notify admin when subscriptions become expired."""
-    expired_notifications_file = "expired_notifications.json"
+    expired_notifications_file = managed_data_path("expired_notifications.json")
     await asyncio.sleep(60)
     while True:
         try:

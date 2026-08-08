@@ -13,6 +13,7 @@ done
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR=/opt/obscura-bot
 CONFIG_DIR=/etc/obscura-bot
+STATE_DIR=/var/lib/obscura-bot
 ENV_FILE=${CONFIG_DIR}/obscura-bot.env
 SERVICE_FILE=/etc/systemd/system/obscura-bot.service
 
@@ -22,6 +23,7 @@ fi
 
 install -d -m 0755 "${INSTALL_DIR}"
 install -d -m 0750 -o root -g obscura-bot "${CONFIG_DIR}"
+install -d -m 0750 -o obscura-bot -g obscura-bot "${STATE_DIR}"
 if [[ ${SOURCE_DIR} != ${INSTALL_DIR} ]]; then
   cp -a "${SOURCE_DIR}/." "${INSTALL_DIR}/"
 fi
@@ -32,6 +34,8 @@ python3 -m venv "${INSTALL_DIR}/.venv"
 "${INSTALL_DIR}/.venv/bin/pip" install "${INSTALL_DIR}"
 chown -R root:obscura-bot "${INSTALL_DIR}"
 chmod -R g+rX "${INSTALL_DIR}"
+chown -R obscura-bot:obscura-bot "${STATE_DIR}"
+chmod -R u+rwX,g+rX,o-rwx "${STATE_DIR}"
 install -d -m 0755 /usr/local/bin
 install -m 0755 "${SOURCE_DIR}/deploy/sui-bot" /usr/local/bin/sui-bot
 

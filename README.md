@@ -27,6 +27,8 @@ systemctl status obscura-bot
 journalctl -u obscura-bot -f
 ```
 
+The systemd deployment logs to journald and disables the optional `bot.log` file. This prevents migrated or root-owned log files from blocking startup. Runtime state under `/var/lib/obscura-bot` is recursively assigned to the service account on every installation.
+
 After installation, run this from any directory to open the management menu:
 
 ```bash
@@ -45,8 +47,14 @@ sui-bot logs --follow
 sudo sui-bot config
 sui-bot show-config
 sui-bot validate
+sudo sui-bot doctor
+sudo sui-bot update
 sudo sui-bot uninstall
 ```
+
+`sui-bot doctor` prints the exact assignment, cache, metrics, and runtime-settings paths used by the service. It validates `assignments.json` and reports the number of Telegram users and linked S-UI clients. Under systemd, relative state paths are always resolved below `/var/lib/obscura-bot`, regardless of the process working directory.
+
+`sui-bot update` clones the latest revision from `https://github.com/Sownix21/SUI-Bot.git` into a temporary directory and runs its installer. The existing `/etc/obscura-bot/obscura-bot.env` and `/var/lib/obscura-bot` state are preserved. Set `SUI_BOT_REPOSITORY` to override the update source.
 
 Uninstallation requires typing the exact confirmation `UNINSTALL SUI BOT`. It stops and disables the service, then removes the systemd unit, `/opt/obscura-bot`, `/etc/obscura-bot`, `/var/lib/obscura-bot`, `/usr/local/bin/sui-bot`, and the dedicated `obscura-bot` system user/group. This also deletes local configuration, state, and backups.
 

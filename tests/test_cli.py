@@ -32,6 +32,13 @@ def test_secret_masking() -> None:
     assert cli.mask_value("ADMIN_TELEGRAM_ID", "123") == "123"
 
 
+def test_relative_data_paths_resolve_under_state_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    assert cli.configured_data_path({}, "ASSIGNMENTS_FILE", "assignments.json") == tmp_path / "assignments.json"
+    absolute = tmp_path / "custom.json"
+    assert cli.configured_data_path({"ASSIGNMENTS_FILE": str(absolute)}, "ASSIGNMENTS_FILE", "assignments.json") == absolute
+
+
 def test_atomic_environment_write_is_reloadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "obscura-bot.env"
     monkeypatch.setattr(cli, "require_root", lambda _action: None)

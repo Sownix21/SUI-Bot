@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ CONFIG_DIR = Path("/etc/obscura-bot")
 STATE_DIR = Path("/var/lib/obscura-bot")
 COMMAND_FILE = Path("/usr/local/bin/sui-bot")
 SERVICE_USER = "obscura-bot"
+DEFAULT_REPOSITORY = "https://github.com/Sownix21/SUI-Bot.git"
 SECRET_KEYS = {"BOT_TOKEN", "SUI_TOKEN"}
 REQUIRED_KEYS = {"SUI_HOST", "SUI_TOKEN", "BOT_TOKEN", "ADMIN_TELEGRAM_ID", "FALLBACK_SUB_URI"}
 EDITABLE_FIELDS = [
@@ -231,6 +233,89 @@ def status_summary() -> str:
     return result.stdout.strip() or "unknown"
 
 
+def configured_data_path(values: dict[str, str], key: str, default: str) -> Path:
+    configured = values.get(key, "").strip() or default
+    path = Path(configured)
+    return path if path.is_absolute() else STATE_DIR / path
+
+
+def data_diagnostics() -> bool:
+    """Show the exact runtime paths and validate migrated assignment data."""
+    require_root("Running data diagnostics")
+    values = load_environment()
+    files = [
+        ("Assignments", configured_data_path(values, "ASSIGNMENTS_FILE", "assignments.json")),
+        ("Metrics", configured_data_path(values, "METRICS_FILE", "metrics.json")),
+        ("Subscription cache", configured_data_path(values, "SUB_CACHE_FILE", "subscription_cache.json")),
+        ("Inbound cache", STATE_DIR / "inbounds_cache.json"),
+        ("Runtime settings", STATE_DIR / "runtime_settings.json"),
+        ("Expiry state", STATE_DIR / "expired_notifications.json"),
+    ]
+    print(f"\nSUI Bot state directory: {STATE_DIR}")
+    print(f"Exists: {STATE_DIR.exists()} | readable: {os.access(STATE_DIR, os.R_OK)} | writable: {os.access(STATE_DIR, os.W_OK)}")
+    valid = True
+    for label, path in files:
+        if path.is_file():
+            details = path.stat()
+            print(f"  ✓ {label:20} {path} ({details.st_size} bytes, uid={details.st_uid}, gid={details.st_gid})")
+        else:
+            marker = "✗" if label == "Assignments" else "-"
+            print(f"  {marker} {label:20} {path} (missing)")
+            if label == "Assignments":
+                valid = False
+
+    assignments_path = files[0][1]
+    if assignments_path.is_file():
+        try:
+            data = json.loads(assignments_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("telegram_clients"), dict):
+                data = data["telegram_clients"]
+            if not isinstance(data, dict):
+                raise ValueError("top-level value must be a JSON object")
+            users = 0
+            links = 0
+            for telegram_id, assigned in data.items():
+                int(telegram_id)
+                client_ids = assigned if isinstance(assigned, list) else [assigned]
+                for client_id in client_ids:
+                    if int(client_id) <= 0:
+                        raise ValueError(f"invalid client ID for Telegram ID {telegram_id}")
+                links += len(client_ids)
+                users += 1
+            print(f"\nAssignments JSON is valid: {users} Telegram user(s), {links} client link(s).")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"\nAssignments JSON is invalid: {exc}", file=sys.stderr)
+            valid = False
+
+    if not valid:
+        print("\nExpected assignment destination:", assignments_path, file=sys.stderr)
+        print("After copying, run: chown -R obscura-bot:obscura-bot /var/lib/obscura-bot", file=sys.stderr)
+    return valid
+
+
+def update_bot(*, confirmed: bool = False) -> None:
+    """Clone the latest GitHub revision and run its idempotent installer."""
+    require_root("Updating SUI Bot")
+    repository = os.getenv("SUI_BOT_REPOSITORY", DEFAULT_REPOSITORY)
+    if not confirmed:
+        print(f"Latest source: {repository}")
+        if input("Download and install the latest SUI Bot version? [Y/n]: ").strip().lower() in {"n", "no"}:
+            print("Update cancelled.")
+            return
+    git = require_command("git")
+    bash = require_command("bash")
+    try:
+        with tempfile.TemporaryDirectory(prefix="sui-bot-update-") as temporary_dir:
+            subprocess.run([git, "clone", "--depth", "1", repository, temporary_dir], check=True)  # noqa: S603
+            installer = Path(temporary_dir) / "scripts" / "install.sh"
+            if not installer.is_file():
+                raise RuntimeError("Downloaded repository does not contain scripts/install.sh")
+            subprocess.run([bash, str(installer)], check=True)  # noqa: S603
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Update failed with exit code {exc.returncode}") from exc
+    print("SUI Bot was updated successfully. Reopen sui-bot to use the latest management menu.")
+
+
 def uninstall_bot(*, confirmed: bool = False) -> None:
     """Completely remove SUI Bot after an explicit confirmation."""
     require_root("Uninstalling SUI Bot")
@@ -283,7 +368,9 @@ def interactive_menu() -> int:
         "7": edit_configuration,
         "8": show_configuration,
         "9": validate_configuration,
-        "10": uninstall_bot,
+        "10": update_bot,
+        "11": data_diagnostics,
+        "12": uninstall_bot,
     }
     while True:
         print("\n╭──────────────────────────────────────╮")
@@ -299,7 +386,9 @@ def interactive_menu() -> int:
         print("  7. Modify credentials/settings")
         print("  8. Show configuration (secrets masked)")
         print("  9. Validate configuration")
-        print(" 10. Completely uninstall SUI Bot")
+        print(" 10. Update SUI Bot from GitHub")
+        print(" 11. Diagnose assignments and data")
+        print(" 12. Completely uninstall SUI Bot")
         print("  0. Exit")
         choice = input("\nSelect an option: ").strip()
         if choice == "0":
@@ -326,6 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("config", help="Interactively edit credentials and settings")
     subparsers.add_parser("show-config", help="Display configuration with secrets masked")
     subparsers.add_parser("validate", help="Validate the environment file")
+    subparsers.add_parser("doctor", help="Validate assignment and runtime data files")
+    subparsers.add_parser("update", help="Download and install the latest version from GitHub")
     subparsers.add_parser("uninstall", help="Completely uninstall SUI Bot and its managed data")
     return parser
 
@@ -347,6 +438,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "validate":
             return 0 if validate_configuration() else 1
+        if args.command == "doctor":
+            return 0 if data_diagnostics() else 1
+        if args.command == "update":
+            update_bot()
+            return 0
         if args.command == "uninstall":
             uninstall_bot()
             return 0
