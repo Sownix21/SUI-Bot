@@ -7,7 +7,7 @@ Obscura Bot is an asynchronous Telegram administration bot for an S-UI panel. It
 On a systemd-based Linux server with Python 3.10 or newer:
 
 ```bash
-sudo bash (https://github.com/Sownix21/SUI-Bot/blob/main/scripts/install.sh)
+sudo bash https://github.com/Sownix21/SUI-Bot/main/scripts/install.sh
 ```
 
 The installer:
