@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-for command in python3 systemctl useradd install cp ln; do
+for command in python3 systemctl useradd install cp chown chmod; do
   command -v "${command}" >/dev/null || { echo "Missing required command: ${command}" >&2; exit 1; }
 done
 
@@ -30,8 +30,10 @@ rm -rf "${INSTALL_DIR}/.venv"
 python3 -m venv "${INSTALL_DIR}/.venv"
 "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
 "${INSTALL_DIR}/.venv/bin/pip" install "${INSTALL_DIR}"
+chown -R root:obscura-bot "${INSTALL_DIR}"
+chmod -R g+rX "${INSTALL_DIR}"
 install -d -m 0755 /usr/local/bin
-ln -sfn "${INSTALL_DIR}/.venv/bin/sui-bot" /usr/local/bin/sui-bot
+install -m 0755 "${SOURCE_DIR}/deploy/sui-bot" /usr/local/bin/sui-bot
 
 write_env_value() {
   local key=$1 value=$2
@@ -67,6 +69,6 @@ systemctl daemon-reload
 systemctl enable obscura-bot.service
 systemctl restart obscura-bot.service
 
-echo "Obscura Bot installed and started."
+echo "SUI Bot installed and started."
 echo "Status: systemctl status obscura-bot"
 echo "Logs:   journalctl -u obscura-bot -f"

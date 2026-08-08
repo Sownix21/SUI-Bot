@@ -1,4 +1,4 @@
-"""Environment-backed configuration for Obscura Bot.
+"""Environment-backed configuration for SUI Bot.
 
 Secrets are deliberately never written by the application.  Deployment tooling
 is responsible for creating a permission-restricted environment file.
@@ -112,4 +112,3 @@ class Settings:
 
 
 _load_local_env()
-

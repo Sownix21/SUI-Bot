@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/obscura-bot/.venv/bin/python -m obscura_bot.cli "$@"

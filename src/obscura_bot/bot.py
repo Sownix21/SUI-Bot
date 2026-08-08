@@ -1096,7 +1096,7 @@ def get_pagination_keyboard(current_page: int, total_pages: int, prefix: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_admin = (user_id == ADMIN_TELEGRAM_ID)
-    welcome_msg = "🤖 Welcome To Obscura Bot\n\nChoose The Desired Option Below:"
+    welcome_msg = "🤖 Welcome To SUI Bot\n\nChoose The Desired Option Below:"
     keyboard = get_main_menu_keyboard(is_admin)
     await update.message.reply_text(welcome_msg, reply_markup=keyboard)
 

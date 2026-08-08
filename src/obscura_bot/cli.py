@@ -1,4 +1,4 @@
-"""Linux administration CLI for the Obscura Bot service."""
+"""Linux administration CLI for the SUI Bot service."""
 
 from __future__ import annotations
 
@@ -18,6 +18,12 @@ from .security import validate_service_url
 
 SERVICE_NAME = "obscura-bot.service"
 DEFAULT_ENV_FILE = Path("/etc/obscura-bot/obscura-bot.env")
+SERVICE_FILE = Path("/etc/systemd/system/obscura-bot.service")
+INSTALL_DIR = Path("/opt/obscura-bot")
+CONFIG_DIR = Path("/etc/obscura-bot")
+STATE_DIR = Path("/var/lib/obscura-bot")
+COMMAND_FILE = Path("/usr/local/bin/sui-bot")
+SERVICE_USER = "obscura-bot"
 SECRET_KEYS = {"BOT_TOKEN", "SUI_TOKEN"}
 REQUIRED_KEYS = {"SUI_HOST", "SUI_TOKEN", "BOT_TOKEN", "ADMIN_TELEGRAM_ID", "FALLBACK_SUB_URI"}
 EDITABLE_FIELDS = [
@@ -225,6 +231,47 @@ def status_summary() -> str:
     return result.stdout.strip() or "unknown"
 
 
+def uninstall_bot(*, confirmed: bool = False) -> None:
+    """Completely remove SUI Bot after an explicit confirmation."""
+    require_root("Uninstalling SUI Bot")
+    if not confirmed:
+        print("\nWARNING: This permanently removes SUI Bot and all of its local data, including:")
+        print(f"  - Application:   {INSTALL_DIR}")
+        print(f"  - Configuration: {CONFIG_DIR}")
+        print(f"  - State/backups: {STATE_DIR}")
+        print(f"  - Service:       {SERVICE_FILE}")
+        print(f"  - Command:       {COMMAND_FILE}")
+        print(f"  - System user:   {SERVICE_USER}")
+        confirmation = input("\nType UNINSTALL SUI BOT to continue: ").strip()
+        if confirmation != "UNINSTALL SUI BOT":
+            print("Uninstallation cancelled.")
+            return
+
+    systemctl_executable = require_command("systemctl")
+    subprocess.run([systemctl_executable, "stop", SERVICE_NAME], check=False)  # noqa: S603
+    subprocess.run([systemctl_executable, "disable", SERVICE_NAME], check=False)  # noqa: S603
+    subprocess.run([systemctl_executable, "reset-failed", SERVICE_NAME], check=False)  # noqa: S603
+
+    SERVICE_FILE.unlink(missing_ok=True)
+    COMMAND_FILE.unlink(missing_ok=True)
+    for directory in (INSTALL_DIR, CONFIG_DIR, STATE_DIR):
+        if directory.is_symlink():
+            directory.unlink()
+        elif directory.exists():
+            shutil.rmtree(directory)
+
+    subprocess.run([systemctl_executable, "daemon-reload"], check=False)  # noqa: S603
+
+    userdel = shutil.which("userdel")
+    if userdel:
+        subprocess.run([userdel, SERVICE_USER], check=False)  # noqa: S603
+    groupdel = shutil.which("groupdel")
+    if groupdel:
+        subprocess.run([groupdel, SERVICE_USER], check=False)  # noqa: S603
+
+    print("\nSUI Bot and all managed components were completely uninstalled.")
+
+
 def interactive_menu() -> int:
     actions = {
         "1": lambda: systemctl("status"),
@@ -236,10 +283,11 @@ def interactive_menu() -> int:
         "7": edit_configuration,
         "8": show_configuration,
         "9": validate_configuration,
+        "10": uninstall_bot,
     }
     while True:
         print("\n╭──────────────────────────────────────╮")
-        print("│       Obscura Bot Administration     │")
+        print("│          SUI Bot Administration      │")
         print("╰──────────────────────────────────────╯")
         print(f"Service status: {status_summary()}\n")
         print("  1. Detailed status")
@@ -251,6 +299,7 @@ def interactive_menu() -> int:
         print("  7. Modify credentials/settings")
         print("  8. Show configuration (secrets masked)")
         print("  9. Validate configuration")
+        print(" 10. Completely uninstall SUI Bot")
         print("  0. Exit")
         choice = input("\nSelect an option: ").strip()
         if choice == "0":
@@ -267,7 +316,7 @@ def interactive_menu() -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="sui-bot", description="Manage the Obscura Bot systemd service")
+    parser = argparse.ArgumentParser(prog="sui-bot", description="Manage the SUI Bot systemd service")
     subparsers = parser.add_subparsers(dest="command")
     for command in ("status", "start", "stop", "restart"):
         subparsers.add_parser(command)
@@ -277,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("config", help="Interactively edit credentials and settings")
     subparsers.add_parser("show-config", help="Display configuration with secrets masked")
     subparsers.add_parser("validate", help="Validate the environment file")
+    subparsers.add_parser("uninstall", help="Completely uninstall SUI Bot and its managed data")
     return parser
 
 
@@ -297,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "validate":
             return 0 if validate_configuration() else 1
+        if args.command == "uninstall":
+            uninstall_bot()
+            return 0
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

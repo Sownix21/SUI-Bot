@@ -1,5 +1,5 @@
 [Unit]
-Description=Obscura Telegram Bot
+Description=SUI Bot Telegram Administration Service
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Group=obscura-bot
 WorkingDirectory=/var/lib/obscura-bot
 EnvironmentFile=/etc/obscura-bot/obscura-bot.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/obscura-bot/.venv/bin/obscura-bot
+ExecStart=/opt/obscura-bot/.venv/bin/python -m obscura_bot
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -39,4 +39,3 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
-

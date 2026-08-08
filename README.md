@@ -1,6 +1,6 @@
-# Obscura Bot
+# SUI Bot
 
-Obscura Bot is an asynchronous Telegram administration bot for an S-UI panel. It manages clients, assignments, usage, renewal receipts, reminders, broadcasts, backups, and server-health alerts.
+SUI Bot is an asynchronous Telegram administration bot for an S-UI panel. It manages clients, assignments, usage, renewal receipts, reminders, broadcasts, backups, and server-health alerts.
 
 ## One-command Linux installation
 
@@ -18,6 +18,8 @@ The installer:
 - installs and hardens `obscura-bot.service`;
 - runs `systemctl enable --now obscura-bot`.
 
+The service starts the package through the virtual environment's Python interpreter rather than executing a generated script under `/opt`. This remains compatible with servers where `/opt` is mounted with restrictive execution settings.
+
 Check it with:
 
 ```bash
@@ -31,7 +33,7 @@ After installation, run this from any directory to open the management menu:
 sudo sui-bot
 ```
 
-The menu can start, stop or restart the service, show status and live/recent logs, validate configuration, display masked settings, and securely update tokens, administrator IDs, URLs, Redis values, backup limits, and renewal settings. Credential changes are written atomically with mode `0600`, and the menu offers to restart the service afterward.
+The menu can start, stop or restart the service, show status and live/recent logs, validate configuration, display masked settings, securely update tokens, administrator IDs, URLs, Redis values, backup limits and renewal settings, or completely uninstall the bot. Credential changes are written atomically with mode `0600`, and the menu offers to restart the service afterward.
 
 Non-interactive commands are also available:
 
@@ -43,7 +45,10 @@ sui-bot logs --follow
 sudo sui-bot config
 sui-bot show-config
 sui-bot validate
+sudo sui-bot uninstall
 ```
+
+Uninstallation requires typing the exact confirmation `UNINSTALL SUI BOT`. It stops and disables the service, then removes the systemd unit, `/opt/obscura-bot`, `/etc/obscura-bot`, `/var/lib/obscura-bot`, `/usr/local/bin/sui-bot`, and the dedicated `obscura-bot` system user/group. This also deletes local configuration, state, and backups.
 
 For unattended installation, place a completed environment file at `/etc/obscura-bot/obscura-bot.env` before running the installer. If no terminal is available, the installer creates a protected template and exits so secrets are never guessed or placed on a command line.
 

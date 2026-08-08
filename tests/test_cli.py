@@ -39,3 +39,37 @@ def test_atomic_environment_write_is_reloadable(tmp_path: Path, monkeypatch: pyt
     assert cli.load_environment(target) == valid_environment()
     if os.name == "posix":
         assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_uninstall_removes_only_managed_components(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_dir = tmp_path / "opt" / "obscura-bot"
+    config_dir = tmp_path / "etc" / "obscura-bot"
+    state_dir = tmp_path / "var" / "lib" / "obscura-bot"
+    service_file = tmp_path / "etc" / "systemd" / "obscura-bot.service"
+    command_file = tmp_path / "usr" / "local" / "bin" / "sui-bot"
+    for directory in (install_dir, config_dir, state_dir):
+        directory.mkdir(parents=True)
+        (directory / "managed-data").write_text("test", encoding="utf-8")
+    for file in (service_file, command_file):
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("test", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cli, "STATE_DIR", state_dir)
+    monkeypatch.setattr(cli, "SERVICE_FILE", service_file)
+    monkeypatch.setattr(cli, "COMMAND_FILE", command_file)
+    monkeypatch.setattr(cli, "require_root", lambda _action: None)
+    monkeypatch.setattr(cli, "require_command", lambda _command: "/bin/systemctl")
+    monkeypatch.setattr(cli.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **_kwargs: calls.append(command))
+
+    cli.uninstall_bot(confirmed=True)
+
+    assert not install_dir.exists()
+    assert not config_dir.exists()
+    assert not state_dir.exists()
+    assert not service_file.exists()
+    assert not command_file.exists()
+    assert ["/bin/systemctl", "daemon-reload"] in calls
