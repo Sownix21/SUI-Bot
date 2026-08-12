@@ -22,10 +22,11 @@ import aiohttp
 import psutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.helpers import escape_markdown
 
 from .backup import BackupTooLargeError, stream_response_to_file
+from .backup_bundle import MAX_BUNDLE_BYTES, build_bundle, load_bundle, restore_bundle, write_bundle
 from .config import Settings
 from .reporting import (
     expiring_clients_with_assignments,
@@ -93,7 +94,6 @@ REDIS_DB = SETTINGS.redis_db
 ITEMS_PER_PAGE = SETTINGS.items_per_page
 SUB_CACHE_FILE = managed_data_path(SETTINGS.sub_cache_file)
 SUB_CACHE_DURATION = SETTINGS.sub_cache_duration
-FALLBACK_SUB_URI = SETTINGS.fallback_sub_uri
 ASSIGNMENTS_FILE = managed_data_path(SETTINGS.assignments_file)
 METRICS_FILE = managed_data_path(SETTINGS.metrics_file)
 REMINDER_DAYS = [1, 3, 5]
@@ -104,6 +104,7 @@ PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.p
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
 LANGUAGE_STORE_FILE = managed_data_path("user_languages.json")
 language_store = LanguageStore(LANGUAGE_STORE_FILE)
+EXPIRED_NOTIFICATIONS_FILE = managed_data_path("expired_notifications.json")
 
 # Inbounds cache constants
 INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
@@ -145,6 +146,7 @@ EDIT_USER_GET_ID, EDIT_USER_NAME, EDIT_USER_INBOUNDS, EDIT_USER_VOLUME, EDIT_USE
 DELETE_USER_GET_ID, DELETE_USER_CONFIRM = range(15, 17)
 BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(17, 19)
 SETTINGS_CARD_NUMBER, SETTINGS_CARD_HOLDER = range(19, 21)
+RESTORE_BACKUP_FILE = 21
 
 _user_requests = {}
 _blocked_users = {}
@@ -153,6 +155,7 @@ sub_cache_time = 0
 telegram_clients = {}  # Format: {telegram_id: [client_id1, client_id2, ...]}
 redis_client = None
 pending_renew_requests = {}
+bot_backup_lock = asyncio.Lock()
 
 def parse_renewal_month_options(raw: Any) -> List[int]:
     items = []
@@ -853,7 +856,9 @@ async def get_subscription_base_url(force_refresh=False) -> str:
         return sub_base_url
     if await refresh_server_metadata() and sub_base_url:
         return sub_base_url
-    return sub_base_url if sub_base_url else FALLBACK_SUB_URI
+    if sub_base_url:
+        return sub_base_url
+    raise RuntimeError("S-UI did not provide a subscription URI and no cached URI is available")
 
 async def refresh_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1059,9 +1064,130 @@ def build_settings_menu_keyboard():
         [InlineKeyboardButton("➖ 50K", callback_data='settings_price_minus_50000'), InlineKeyboardButton("➕ 50K", callback_data='settings_price_plus_50000')],
         [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
         [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
+        [InlineKeyboardButton("💾 Backup & Restore", callback_data='settings_backup_restore')],
         [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
         [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
     ])
+
+def build_backup_restore_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Create & Send Backup", callback_data='settings_backup_create')],
+        [InlineKeyboardButton("📥 Restore Instructions", callback_data='settings_backup_help')],
+        [InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')],
+    ])
+
+def bot_state_paths() -> dict[str, str]:
+    return {
+        "assignments": ASSIGNMENTS_FILE,
+        "metrics": METRICS_FILE,
+        "languages": LANGUAGE_STORE_FILE,
+        "runtime_settings": RUNTIME_SETTINGS_FILE,
+        "subscription_cache": SUB_CACHE_FILE,
+        "inbounds_cache": INBOUNDS_CACHE_FILE,
+        "expired_notifications": EXPIRED_NOTIFICATIONS_FILE,
+    }
+
+def backup_configuration_summary() -> dict[str, Any]:
+    return {
+        "admin_telegram_id": ADMIN_TELEGRAM_ID,
+        "admin_client_id": ADMIN_CLIENT_ID,
+        "sui_host": SUI_HOST,
+        "database_name": DB_NAME,
+        "backup_max_bytes": BACKUP_MAX_BYTES,
+        "items_per_page": ITEMS_PER_PAGE,
+        "rate_limit_window": RATE_LIMIT_WINDOW,
+        "max_requests_per_window": MAX_REQUESTS_PER_WINDOW,
+        "secrets_included": False,
+        "secret_notice": "BOT_TOKEN and SUI_TOKEN are intentionally excluded",
+    }
+
+async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    async with bot_backup_lock:
+        await asyncio.to_thread(save_assignments)
+        await asyncio.to_thread(metrics.save_metrics)
+        with tempfile.TemporaryDirectory(prefix="sui-bot-backup-") as temporary_dir:
+            filename = f"sui-bot-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.sui-backup.json"
+            destination = Path(temporary_dir) / filename
+            bundle = await asyncio.to_thread(build_bundle, bot_state_paths(), backup_configuration_summary())
+            await asyncio.to_thread(write_bundle, bundle, destination)
+            with destination.open("rb") as backup_file:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=backup_file,
+                    filename=filename,
+                    caption=(
+                        "✅ SUI Bot backup created.\n\n"
+                        "Keep this file private. Restore it with /restore.\n"
+                        "Bot and S-UI tokens are not included."
+                    ),
+                )
+
+def reload_restored_state() -> None:
+    global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
+    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, renewal_month_options
+    load_assignments()
+    language_store.load()
+    metrics.load_metrics()
+    load_cached_sub_uri()
+    inbounds_cache = load_cached_inbounds()
+    restored_settings = load_runtime_settings(RUNTIME_SETTINGS_FILE)
+    RUNTIME_SETTINGS.clear()
+    RUNTIME_SETTINGS.update(restored_settings)
+    RENEWAL_MONTHLY_PRICE = int(restored_settings.get("RENEWAL_MONTHLY_PRICE", SETTINGS.renewal_monthly_price))
+    RENEWAL_MONTH_OPTIONS = str(restored_settings.get("RENEWAL_MONTH_OPTIONS", SETTINGS.renewal_month_options))
+    PAYMENT_CARD_NUMBER = str(restored_settings.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
+    PAYMENT_CARD_HOLDER = str(restored_settings.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
+    renewal_month_options = parse_renewal_month_options(RENEWAL_MONTH_OPTIONS)
+
+@rate_limited(admin_only=True)
+async def restore_backup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("❌ Admin only")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "📥 Send the `.sui-backup.json` file now.\n\n"
+        "The file will be validated before any state is replaced.\n"
+        "Cancel: /cancel"
+    )
+    return RESTORE_BACKUP_FILE
+
+async def restore_backup_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return ConversationHandler.END
+    document = update.message.document
+    if document is None:
+        await update.message.reply_text("❌ Send the backup as a document, or use /cancel.")
+        return RESTORE_BACKUP_FILE
+    if document.file_size and document.file_size > MAX_BUNDLE_BYTES:
+        await update.message.reply_text("❌ Backup file is too large.")
+        return RESTORE_BACKUP_FILE
+    status = await update.message.reply_text("⏳ Validating and restoring backup...")
+    try:
+        async with bot_backup_lock:
+            with tempfile.TemporaryDirectory(prefix="sui-bot-restore-") as temporary_dir:
+                source = Path(temporary_dir) / "uploaded.sui-backup.json"
+                telegram_file = await context.bot.get_file(document.file_id)
+                await telegram_file.download_to_drive(custom_path=str(source))
+                bundle = await asyncio.to_thread(load_bundle, source)
+                restored = await asyncio.to_thread(restore_bundle, bundle, bot_state_paths())
+            await asyncio.to_thread(reload_restored_state)
+        await status.edit_text(
+            "✅ Backup restored successfully.\n\n"
+            f"Restored sections: {', '.join(restored) or 'none'}\n"
+            "The restored assignments and settings are active."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError, TelegramError) as exc:
+        logger.warning("Rejected backup restore from admin %s: %s", update.effective_user.id, exc)
+        await status.edit_text(f"❌ Restore failed: {str(exc)[:500]}")
+        return RESTORE_BACKUP_FILE
+
+async def restore_backup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("❌ Backup restore canceled.", reply_markup=build_settings_menu_keyboard())
+    context.user_data.clear()
+    return ConversationHandler.END
 
 def build_settings_plans_keyboard():
     enabled = set(get_renewal_month_options())
@@ -2178,6 +2304,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
+            )
+        elif data == 'settings_backup_restore':
+            await query.edit_message_text(
+                "💾 SUI Bot Backup & Restore\n\n"
+                "Create one validated file containing assignments, user language choices, metrics, runtime settings, and cached bot data.\n\n"
+                "Live bot and S-UI tokens are intentionally excluded.",
+                reply_markup=build_backup_restore_keyboard(),
+            )
+        elif data == 'settings_backup_create':
+            await query.edit_message_text("⏳ Creating SUI Bot backup...")
+            try:
+                await send_state_backup(context, user_id)
+            except (OSError, ValueError, RuntimeError, TelegramError) as exc:
+                logger.exception("Failed to create or send SUI Bot state backup")
+                await query.edit_message_text(
+                    f"❌ Backup failed: {str(exc)[:500]}",
+                    reply_markup=build_backup_restore_keyboard(),
+                )
+            else:
+                await query.edit_message_text(
+                    "✅ Backup sent to this chat. Keep it private.",
+                    reply_markup=build_backup_restore_keyboard(),
+                )
+        elif data == 'settings_backup_help':
+            await query.edit_message_text(
+                "📥 Restore a SUI Bot Backup\n\n"
+                "1. Send /restore\n"
+                "2. Send the `.sui-backup.json` document\n"
+                "3. The bot validates its format, checksum, size, and allowed data sections before restoring it.",
+                reply_markup=build_backup_restore_keyboard(),
             )
         elif data == 'settings_plans':
             if user_id != ADMIN_TELEGRAM_ID:
@@ -3569,7 +3725,6 @@ async def daily_subscription_reminder(app):
 
 async def monitor_expired_subscriptions(app):
     """Continuously notify admin when subscriptions become expired."""
-    expired_notifications_file = managed_data_path("expired_notifications.json")
     await asyncio.sleep(60)
     while True:
         try:
@@ -3586,7 +3741,7 @@ async def monitor_expired_subscriptions(app):
             notified_expired_ids = set()
             try:
                 notified_expired_ids = await asyncio.to_thread(
-                    load_expired_notification_ids, expired_notifications_file
+                    load_expired_notification_ids, EXPIRED_NOTIFICATIONS_FILE
                 )
             except Exception as e:
                 logger.error(f"Failed to load expiration notifications state: {e}")
@@ -3630,7 +3785,7 @@ async def monitor_expired_subscriptions(app):
             try:
                 await asyncio.to_thread(
                     save_expired_notification_ids,
-                    expired_notifications_file,
+                    EXPIRED_NOTIFICATIONS_FILE,
                     notified_expired_ids,
                     datetime.now(timezone.utc).isoformat(),
                 )
@@ -4345,9 +4500,19 @@ async def main():
         allow_reentry=True
     )
 
+    restore_conv = ConversationHandler(
+        entry_points=[CommandHandler('restore', restore_backup_start)],
+        states={
+            RESTORE_BACKUP_FILE: [MessageHandler(filters.Document.ALL & ~filters.COMMAND, restore_backup_file)],
+        },
+        fallbacks=[CommandHandler('cancel', restore_backup_cancel)],
+        allow_reentry=True,
+    )
+
 
     app.add_handler(broadcast_conv)
     app.add_handler(settings_conv)
+    app.add_handler(restore_conv)
     app.add_handler(create_user_conv)
     app.add_handler(edit_user_conv)
     app.add_handler(delete_user_conv)

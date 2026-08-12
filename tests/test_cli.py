@@ -12,7 +12,6 @@ def valid_environment() -> dict[str, str]:
         "SUI_TOKEN": "sui-secret",
         "BOT_TOKEN": "123456:telegram-secret",
         "ADMIN_TELEGRAM_ID": "123456",
-        "FALLBACK_SUB_URI": "https://subscriptions.example.com/sub",
         "ALLOW_INSECURE_HTTP": "false",
     }
 

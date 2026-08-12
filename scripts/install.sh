@@ -95,12 +95,10 @@ if [[ ! -f ${ENV_FILE} ]]; then
     read -r -s -p "S-UI token: " sui_token </dev/tty; echo
     read -r -s -p "Telegram bot token: " bot_token </dev/tty; echo
     read -r -p "Admin Telegram ID: " admin_id </dev/tty
-    read -r -p "Fallback subscription URL: " fallback_uri </dev/tty
     write_env_value SUI_HOST "${sui_host}"
     write_env_value SUI_TOKEN "${sui_token}"
     write_env_value BOT_TOKEN "${bot_token}"
     write_env_value ADMIN_TELEGRAM_ID "${admin_id}"
-    write_env_value FALLBACK_SUB_URI "${fallback_uri}"
     write_env_value ALLOW_INSECURE_HTTP "false"
   else
     install -m 0600 -o root -g sui-bot "${SOURCE_DIR}/.env.example" "${ENV_FILE}"

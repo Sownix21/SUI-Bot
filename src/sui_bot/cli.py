@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -27,13 +26,12 @@ COMMAND_FILE = Path("/usr/local/bin/sui-bot")
 SERVICE_USER = "sui-bot"
 DEFAULT_REPOSITORY = "https://github.com/Sownix21/SUI-Bot.git"
 SECRET_KEYS = {"BOT_TOKEN", "SUI_TOKEN"}
-REQUIRED_KEYS = {"SUI_HOST", "SUI_TOKEN", "BOT_TOKEN", "ADMIN_TELEGRAM_ID", "FALLBACK_SUB_URI"}
+REQUIRED_KEYS = {"SUI_HOST", "SUI_TOKEN", "BOT_TOKEN", "ADMIN_TELEGRAM_ID"}
 EDITABLE_FIELDS = [
     ("SUI_HOST", "S-UI URL"),
     ("SUI_TOKEN", "S-UI token"),
     ("BOT_TOKEN", "Telegram bot token"),
     ("ADMIN_TELEGRAM_ID", "Admin Telegram ID"),
-    ("FALLBACK_SUB_URI", "Fallback subscription URL"),
     ("ADMIN_CLIENT_ID", "Admin client ID"),
     ("ALLOW_INSECURE_HTTP", "Allow insecure HTTP"),
     ("REDIS_HOST", "Redis host"),
@@ -144,11 +142,6 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_service_url(values["SUI_HOST"], allow_insecure_http=allow_http)
     except (RuntimeError, ValueError) as exc:
         errors.append(str(exc))
-    fallback = values.get("FALLBACK_SUB_URI", "")
-    if fallback:
-        parsed = urlsplit(fallback)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            errors.append("FALLBACK_SUB_URI must be an absolute HTTP(S) URL")
     for key in ("ADMIN_CLIENT_ID", "REDIS_PORT", "REDIS_DB", "BACKUP_MAX_BYTES", "RENEWAL_MONTHLY_PRICE"):
         if values.get(key):
             try:

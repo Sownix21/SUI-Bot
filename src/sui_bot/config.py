@@ -69,7 +69,6 @@ class Settings:
     items_per_page: int
     sub_cache_file: str
     sub_cache_duration: int
-    fallback_sub_uri: str
     assignments_file: str
     metrics_file: str
     reminder_cooldown: int
@@ -100,7 +99,6 @@ class Settings:
             items_per_page=env("ITEMS_PER_PAGE", 5, cast=int),
             sub_cache_file=str(env("SUB_CACHE_FILE", "subscription_cache.json")),
             sub_cache_duration=env("SUB_CACHE_DURATION", 24 * 60 * 60, cast=int),
-            fallback_sub_uri=str(env("FALLBACK_SUB_URI", required=True)),
             assignments_file=str(env("ASSIGNMENTS_FILE", "assignments.json")),
             metrics_file=str(env("METRICS_FILE", "metrics.json")),
             reminder_cooldown=env("REMINDER_COOLDOWN", 23 * 60 * 60, cast=int),
