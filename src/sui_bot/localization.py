@@ -147,3 +147,61 @@ def translate(language: str | None, key: str, **values: Any) -> str:
     selected = language if language in TRANSLATIONS else "en"
     template = TRANSLATIONS[selected].get(key, TRANSLATIONS["en"].get(key, key))
     return template.format(**values)
+
+
+# Complete strings used by scheduled reminders and their administrator reports.
+REMINDER_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        "reminder_multi_title": "⚠️ Your subscriptions are about to expire",
+        "reminder_single_title": "⚠️ Your subscription is about to expire!",
+        "days_remaining": "⏳ {days} day(s) remaining",
+        "renew_prompt": "Please renew your subscription.",
+        "reminder_report": "📊 Subscription Reminder Report",
+        "summary": "📈 Summary:", "total_users": "📋 Total users", "eligible_users": "🎯 Eligible for reminder",
+        "reminded": "✅ Successfully reminded", "failed_remind": "❌ Failed to remind", "inactive": "🚫 Inactive users",
+        "inactive_title": "🚫 Inactive users (bot not started or blocked)", "failed_sends": "❌ Failed sends:",
+        "successful_sends": "✅ Successful sends", "days_short": "📅 {days} day(s) remaining",
+        "more_users": "and {count} more user(s)…", "more_errors": "and {count} more error(s)…",
+        "unassigned_title": "⚠️ Unassigned subscriptions approaching expiry ({count})",
+        "unassigned_item": "{index}. {description}\n   👤 Username: {name}\n   🆔 Client ID: {client_id}\n   📅 {days} day(s) remaining\n",
+        "assign_hint": "Use /assign <TelegramID> <ClientID> to link them.", "report_time": "🕐 Report time",
+    },
+    "fa": {
+        "reminder_multi_title": "⚠️ اشتراک‌های شما رو به اتمام هستند", "reminder_single_title": "⚠️ اشتراک شما رو به اتمام است!",
+        "days_remaining": "⏳ {days} روز باقی مانده", "renew_prompt": "لطفاً برای تمدید اشتراک اقدام کنید.",
+        "reminder_report": "📊 گزارش یادآوری اشتراک‌ها", "summary": "📈 خلاصه:", "total_users": "📋 کل کاربران",
+        "eligible_users": "🎯 واجد شرایط یادآوری", "reminded": "✅ یادآوری موفق", "failed_remind": "❌ یادآوری ناموفق",
+        "inactive": "🚫 کاربران غیرفعال", "inactive_title": "🚫 کاربران غیرفعال (ربات را شروع نکرده یا مسدود کرده‌اند)",
+        "failed_sends": "❌ ارسال‌های ناموفق:", "successful_sends": "✅ ارسال‌های موفق", "days_short": "📅 {days} روز باقی مانده",
+        "more_users": "و {count} کاربر دیگر…", "more_errors": "و {count} خطای دیگر…",
+        "unassigned_title": "⚠️ اشتراک‌های بدون اتصال در آستانه انقضا ({count})",
+        "unassigned_item": "{index}. {description}\n   👤 نام کاربری: {name}\n   🆔 شناسه کاربر: {client_id}\n   📅 {days} روز باقی مانده\n",
+        "assign_hint": "برای اتصال از ‎/assign <TelegramID> <ClientID>‎ استفاده کنید.", "report_time": "🕐 زمان گزارش",
+    },
+    "ru": {
+        "reminder_multi_title": "⚠️ Срок ваших подписок скоро истечёт", "reminder_single_title": "⚠️ Срок вашей подписки скоро истечёт!",
+        "days_remaining": "⏳ Осталось дней: {days}", "renew_prompt": "Пожалуйста, продлите подписку.",
+        "reminder_report": "📊 Отчёт о напоминаниях", "summary": "📈 Сводка:", "total_users": "📋 Всего пользователей",
+        "eligible_users": "🎯 Получатели напоминания", "reminded": "✅ Успешно уведомлены", "failed_remind": "❌ Ошибки уведомления",
+        "inactive": "🚫 Неактивные пользователи", "inactive_title": "🚫 Неактивные пользователи (бот не запущен или заблокирован)",
+        "failed_sends": "❌ Ошибки отправки:", "successful_sends": "✅ Успешные отправки", "days_short": "📅 Осталось дней: {days}",
+        "more_users": "и ещё {count} польз.", "more_errors": "и ещё {count} ошибок…",
+        "unassigned_title": "⚠️ Непривязанные подписки с близким сроком окончания ({count})",
+        "unassigned_item": "{index}. {description}\n   👤 Имя: {name}\n   🆔 ID клиента: {client_id}\n   📅 Осталось дней: {days}\n",
+        "assign_hint": "Используйте /assign <TelegramID> <ClientID> для привязки.", "report_time": "🕐 Время отчёта",
+    },
+    "zh": {
+        "reminder_multi_title": "⚠️ 您的订阅即将到期", "reminder_single_title": "⚠️ 您的订阅即将到期！",
+        "days_remaining": "⏳ 剩余 {days} 天", "renew_prompt": "请及时续订。", "reminder_report": "📊 订阅提醒报告",
+        "summary": "📈 摘要：", "total_users": "📋 用户总数", "eligible_users": "🎯 符合提醒条件",
+        "reminded": "✅ 提醒成功", "failed_remind": "❌ 提醒失败", "inactive": "🚫 非活跃用户",
+        "inactive_title": "🚫 非活跃用户（未启动或已屏蔽机器人）", "failed_sends": "❌ 发送失败：",
+        "successful_sends": "✅ 发送成功", "days_short": "📅 剩余 {days} 天", "more_users": "以及另外 {count} 位用户…",
+        "more_errors": "以及另外 {count} 个错误…", "unassigned_title": "⚠️ 即将到期但未绑定的订阅（{count}）",
+        "unassigned_item": "{index}. {description}\n   👤 用户名：{name}\n   🆔 客户 ID：{client_id}\n   📅 剩余 {days} 天\n",
+        "assign_hint": "使用 /assign <TelegramID> <ClientID> 进行绑定。", "report_time": "🕐 报告时间",
+    },
+}
+
+for _language, _messages in REMINDER_TRANSLATIONS.items():
+    TRANSLATIONS[_language].update(_messages)

@@ -21,7 +21,7 @@ from pathlib import Path
 import aiohttp
 import psutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, ExtBot, MessageHandler, filters
 from telegram.error import BadRequest, TelegramError
 from telegram.helpers import escape_markdown
 
@@ -37,6 +37,7 @@ from .runtime_settings import load_runtime_settings, save_runtime_setting
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
 from .navigation import has_multiple_subscriptions
+from .outgoing_localization import localize_inline_markup, localize_outgoing_text
 from .sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata
 
 try:
@@ -403,6 +404,16 @@ def user_language(user_id: int) -> str:
 def tr(user_id: int, key: str, **values: Any) -> str:
     return translate(user_language(user_id), key, **values)
 
+def localized_remaining_time(expiry_timestamp: int, user_id: int) -> str:
+    if expiry_timestamp == 0:
+        return tr(user_id, "unlimited")
+    expiry = datetime.fromtimestamp(expiry_timestamp, timezone.utc)
+    remaining_seconds = (expiry - datetime.now(timezone.utc)).total_seconds()
+    if remaining_seconds <= 0:
+        return tr(user_id, "disabled")
+    days = int(remaining_seconds // 86400) + (1 if remaining_seconds % 86400 else 0)
+    return tr(user_id, "days_remaining", days=days).removeprefix("⏳ ")
+
 
 def language_keyboard():
     rows = [
@@ -410,6 +421,41 @@ def language_keyboard():
         for code, label in SUPPORTED_LANGUAGES.items()
     ]
     return InlineKeyboardMarkup(rows)
+
+class LocalizedExtBot(ExtBot):
+    """Translate all outgoing Telegram content for its destination chat."""
+
+    @staticmethod
+    def _language(chat_id) -> str:
+        try:
+            return user_language(int(chat_id))
+        except (TypeError, ValueError):
+            return "en"
+
+    async def send_message(self, chat_id, text, *args, **kwargs):
+        language = self._language(chat_id)
+        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        return await super().send_message(chat_id, localize_outgoing_text(language, text), *args, **kwargs)
+
+    async def edit_message_text(self, text, chat_id=None, *args, **kwargs):
+        effective_chat_id = chat_id
+        language = self._language(effective_chat_id)
+        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        return await super().edit_message_text(
+            localize_outgoing_text(language, text), chat_id, *args, **kwargs
+        )
+
+    async def send_document(self, chat_id, document, *args, **kwargs):
+        language = self._language(chat_id)
+        kwargs["caption"] = localize_outgoing_text(language, kwargs.get("caption"))
+        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        return await super().send_document(chat_id, document, *args, **kwargs)
+
+    async def send_photo(self, chat_id, photo, *args, **kwargs):
+        language = self._language(chat_id)
+        kwargs["caption"] = localize_outgoing_text(language, kwargs.get("caption"))
+        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        return await super().send_photo(chat_id, photo, *args, **kwargs)
 
 def is_safe_callback_data(data: str) -> bool:
     if not data or len(data) > MAX_CALLBACK_DATA_LEN:
@@ -959,7 +1005,7 @@ def format_client(client: dict, is_admin: bool = False, user_id: int | None = No
     lines.append(f"{tr(uid, 'total_usage')}: {format_bytes(total_used)}")
     volume_str = tr(uid, "unlimited") if volume == 0 else format_bytes(volume)
     lines.append(f"{tr(uid, 'total_volume')}: {volume_str}")
-    lines.append(f"{tr(uid, 'expiry')}: {calculate_remaining_time(expiry)}")
+    lines.append(f"{tr(uid, 'expiry')}: {localized_remaining_time(expiry, uid)}")
 
     if is_admin:
         lines.append(f"{tr(uid, 'description')}: {client.get('desc', 'N/A')}")
@@ -3647,23 +3693,22 @@ async def daily_subscription_reminder(app):
 
             for tg_id, reminders in user_reminders.items():
                 try:
+                    locale = user_language(tg_id)
                     # Check if user has multiple subscriptions
                     if len(reminders) > 1:
-                        # Multiple subscriptions - send detailed message with descriptions only
-                        message = "⚠️ اشتراک‌های شما رو به اتمام است\n\n"
+                        message = f"{translate(locale, 'reminder_multi_title')}\n\n"
 
                         for reminder in reminders:
                             message += f"📱 {reminder['desc']}\n"
-                            message += f"⏳ {reminder['days_remaining']} روز باقی مانده\n\n"
+                            message += f"{translate(locale, 'days_remaining', days=reminder['days_remaining'])}\n\n"
 
-                        message += "لطفا برای تمدید اقدام کنید."
+                        message += translate(locale, "renew_prompt")
                     else:
-                        # Single subscription - simple message with description
                         reminder = reminders[0]
-                        message = (f"⚠️ اشتراک شما رو به اتمام است!\n\n"
+                        message = (f"{translate(locale, 'reminder_single_title')}\n\n"
                                   f"📱 {reminder['desc']}\n"
-                                  f"⏳ {reminder['days_remaining']} روز باقی مانده\n\n"
-                                  f"لطفا اقدام به تمدید کنید.")
+                                  f"{translate(locale, 'days_remaining', days=reminder['days_remaining'])}\n\n"
+                                  f"{translate(locale, 'renew_prompt')}")
 
                     await app.bot.send_message(
                         chat_id=tg_id,
@@ -3802,34 +3847,37 @@ async def monitor_expired_subscriptions(app):
 async def send_reminder_report(app, successful_reminders, failed_reminders, users_not_started, users_with_expiry, users_without_link):
     """Send a report of reminder delivery status to admin"""
     try:
-        report_message = "📊 Subscription Reminder Report\n\n"
+        locale = user_language(ADMIN_TELEGRAM_ID)
+        def tx(key, **values):
+            return translate(locale, key, **values)
+        report_message = f"{tx('reminder_report')}\n\n"
 
         # Summary
         total_clients = len(users_with_expiry)
         total_eligible = len(successful_reminders) + len(failed_reminders) + len(users_not_started)
 
-        report_message += "📈 Summary:\n"
-        report_message += f"• 📋 Total Users: {total_clients}\n"
-        report_message += f"• 🎯 Eligible Users For Reminder: {total_eligible}\n"
-        report_message += f"• ✅ Successfully Reminded: {len(successful_reminders)}\n"
-        report_message += f"• ❌ Failed To Remind: {len(failed_reminders)}\n"
-        report_message += f"• 🚫 Inactive Users: {len(users_not_started)}\n\n"
+        report_message += f"{tx('summary')}\n"
+        report_message += f"• {tx('total_users')}: {total_clients}\n"
+        report_message += f"• {tx('eligible_users')}: {total_eligible}\n"
+        report_message += f"• {tx('reminded')}: {len(successful_reminders)}\n"
+        report_message += f"• {tx('failed_remind')}: {len(failed_reminders)}\n"
+        report_message += f"• {tx('inactive')}: {len(users_not_started)}\n\n"
 
         # Users who haven't started the bot
         if users_not_started:
-            report_message += "🚫 Inactive Users (Haven't Started The Bot)\n"
+            report_message += f"{tx('inactive_title')}\n"
             for i, user in enumerate(users_not_started[:10], 1):
                 report_message += f"{i}. User {user['desc']} (TG: {user['tg_id']})\n"
-                report_message += f"   📅 {user['days_remaining']} Days Remaining\n"
+                report_message += f"   {tx('days_short', days=user['days_remaining'])}\n"
 
             if len(users_not_started) > 10:
-                report_message += f"\n& {len(users_not_started) - 10} Other Users...\n"
+                report_message += f"\n{tx('more_users', count=len(users_not_started) - 10)}\n"
 
             report_message += "\n"
 
         # Failed deliveries (other errors)
         if failed_reminders:
-            report_message += "❌ Failed Sends:\n"
+            report_message += f"{tx('failed_sends')}\n"
             for i, failed in enumerate(failed_reminders[:5], 1):
                 user = failed["reminder"]
                 error = failed["error"]
@@ -3837,26 +3885,41 @@ async def send_reminder_report(app, successful_reminders, failed_reminders, user
                 report_message += f"   📛 Error: {error[:50]}...\n"
 
             if len(failed_reminders) > 5:
-                report_message += f"\n& {len(failed_reminders) - 5} Other Error...\n"
+                report_message += f"\n{tx('more_errors', count=len(failed_reminders) - 5)}\n"
 
             report_message += "\n"
 
         # Successful deliveries
         if successful_reminders:
-            report_message += "✅ Successful Sends\n"
+            report_message += f"{tx('successful_sends')}\n"
             for i, user in enumerate(successful_reminders[:5], 1):
                 report_message += f"{i}. User {user['desc']} (TG: {user['tg_id']})\n"
-                report_message += f"   📅 {user['days_remaining']} Days Remaining\n"
+                report_message += f"   {tx('days_short', days=user['days_remaining'])}\n"
 
             if len(successful_reminders) > 5:
-                report_message += f"\n& {len(successful_reminders) - 5} Other Users...\n"
+                report_message += f"\n{tx('more_users', count=len(successful_reminders) - 5)}\n"
 
         if users_without_link:
-            report_message += f"\n⚠️ Attention: {len(users_without_link)} user(s) are about to expire but are not linked to Telegram.\n"
-            report_message += "(Use /assign To Link Them.)\n"
+            now = datetime.now(timezone.utc)
+            unassigned_expiring = []
+            for user in users_without_link:
+                remaining_seconds = (datetime.fromtimestamp(user["expiry"], timezone.utc) - now).total_seconds()
+                days = int(remaining_seconds // 86400) + (1 if remaining_seconds > 0 and remaining_seconds % 86400 else 0)
+                if days in REMINDER_DAYS:
+                    unassigned_expiring.append((user, days))
+            if unassigned_expiring:
+                report_message += f"\n{tx('unassigned_title', count=len(unassigned_expiring))}\n"
+                for index, (user, days) in enumerate(unassigned_expiring[:20], 1):
+                    report_message += tx(
+                        "unassigned_item", index=index, description=user["desc"], name=user["name"],
+                        client_id=user["client_id"], days=days,
+                    )
+                if len(unassigned_expiring) > 20:
+                    report_message += f"{tx('more_users', count=len(unassigned_expiring) - 20)}\n"
+                report_message += f"{tx('assign_hint')}\n"
 
         # Add timestamp
-        report_message += f"\n🕐 Time Of Report: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        report_message += f"\n{tx('report_time')}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         # Send report to admin
         await app.bot.send_message(
@@ -4436,7 +4499,7 @@ async def main():
     else:
         rate_limiter = RateLimiter(None)
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().bot(LocalizedExtBot(token=BOT_TOKEN)).build()
 
     create_user_conv = ConversationHandler(
         entry_points=[CommandHandler('createuser', create_user_start)],

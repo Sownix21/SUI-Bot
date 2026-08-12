@@ -70,6 +70,8 @@ Open the bot and send:
 
 Every account—including the administrator—is asked to select English, Persian, Russian, or Chinese the first time it starts the bot. The language can be changed later using the Language button.
 
+The selected language applies to the complete Telegram interface: administrator menus and workflows, user subscription and renewal screens, inline buttons, validation/errors, scheduled reminders, reports, backup notifications, and captions. Server-provided names, descriptions, IDs, commands, and URLs remain unchanged.
+
 Users with one assigned client see **My Subscription** and go directly to it. **My Subscriptions** and the subscription-list back button are shown only to users with multiple assigned clients.
 
 ## Manage the bot
@@ -230,6 +232,8 @@ sudo systemctl restart sui-bot.service
 ```
 
 If subscription links or inbounds are unavailable, verify that `SUI_HOST` is reachable and that `SUI_TOKEN` is allowed to call `/apiv2/load`.
+
+Reminder reports identify every due subscription that is not assigned to Telegram. Each entry includes its description, S-UI username, client ID, and remaining days so the administrator can link it with `/assign`.
 
 ## Security notes
 
