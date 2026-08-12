@@ -5,20 +5,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=obscura-bot
-Group=obscura-bot
-WorkingDirectory=/var/lib/obscura-bot
-EnvironmentFile=/etc/obscura-bot/obscura-bot.env
+User=sui-bot
+Group=sui-bot
+WorkingDirectory=/var/lib/sui-bot
+EnvironmentFile=/etc/sui-bot/sui-bot.env
 Environment=PYTHONUNBUFFERED=1
 Environment=BOT_LOG_FILE=
-Environment=DATA_DIR=/var/lib/obscura-bot
-ExecStart=/opt/obscura-bot/.venv/bin/python -m obscura_bot
+Environment=DATA_DIR=/var/lib/sui-bot
+ExecStart=/opt/sui-bot/.venv/bin/python -m sui_bot
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 
-# systemd creates this writable directory as /var/lib/obscura-bot.
-StateDirectory=obscura-bot
+# systemd creates this writable directory as /var/lib/sui-bot.
+StateDirectory=sui-bot
 StateDirectoryMode=0750
 UMask=0077
 

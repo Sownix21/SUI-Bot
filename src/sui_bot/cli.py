@@ -17,14 +17,14 @@ from dotenv import dotenv_values
 
 from .security import validate_service_url
 
-SERVICE_NAME = "obscura-bot.service"
-DEFAULT_ENV_FILE = Path("/etc/obscura-bot/obscura-bot.env")
-SERVICE_FILE = Path("/etc/systemd/system/obscura-bot.service")
-INSTALL_DIR = Path("/opt/obscura-bot")
-CONFIG_DIR = Path("/etc/obscura-bot")
-STATE_DIR = Path("/var/lib/obscura-bot")
+SERVICE_NAME = "sui-bot.service"
+DEFAULT_ENV_FILE = Path("/etc/sui-bot/sui-bot.env")
+SERVICE_FILE = Path("/etc/systemd/system/sui-bot.service")
+INSTALL_DIR = Path("/opt/sui-bot")
+CONFIG_DIR = Path("/etc/sui-bot")
+STATE_DIR = Path("/var/lib/sui-bot")
 COMMAND_FILE = Path("/usr/local/bin/sui-bot")
-SERVICE_USER = "obscura-bot"
+SERVICE_USER = "sui-bot"
 DEFAULT_REPOSITORY = "https://github.com/Sownix21/SUI-Bot.git"
 SECRET_KEYS = {"BOT_TOKEN", "SUI_TOKEN"}
 REQUIRED_KEYS = {"SUI_HOST", "SUI_TOKEN", "BOT_TOKEN", "ADMIN_TELEGRAM_ID", "FALLBACK_SUB_URI"}
@@ -49,7 +49,7 @@ EDITABLE_FIELDS = [
 
 
 def env_file() -> Path:
-    return Path(os.getenv("OBSCURA_SYSTEM_ENV_FILE", str(DEFAULT_ENV_FILE)))
+    return Path(os.getenv("SUI_BOT_SYSTEM_ENV_FILE", str(DEFAULT_ENV_FILE)))
 
 
 def require_root(action: str) -> None:
@@ -289,7 +289,7 @@ def data_diagnostics() -> bool:
 
     if not valid:
         print("\nExpected assignment destination:", assignments_path, file=sys.stderr)
-        print("After copying, run: chown -R obscura-bot:obscura-bot /var/lib/obscura-bot", file=sys.stderr)
+        print("After copying, run: chown -R sui-bot:sui-bot /var/lib/sui-bot", file=sys.stderr)
     return valid
 
 

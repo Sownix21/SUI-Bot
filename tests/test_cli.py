@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from obscura_bot import cli
+from sui_bot import cli
 
 
 def valid_environment() -> dict[str, str]:
@@ -40,7 +40,7 @@ def test_relative_data_paths_resolve_under_state_directory(tmp_path: Path, monke
 
 
 def test_atomic_environment_write_is_reloadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "obscura-bot.env"
+    target = tmp_path / "sui-bot.env"
     monkeypatch.setattr(cli, "require_root", lambda _action: None)
     cli.write_environment(valid_environment(), target)
     assert cli.load_environment(target) == valid_environment()
@@ -49,10 +49,10 @@ def test_atomic_environment_write_is_reloadable(tmp_path: Path, monkeypatch: pyt
 
 
 def test_uninstall_removes_only_managed_components(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    install_dir = tmp_path / "opt" / "obscura-bot"
-    config_dir = tmp_path / "etc" / "obscura-bot"
-    state_dir = tmp_path / "var" / "lib" / "obscura-bot"
-    service_file = tmp_path / "etc" / "systemd" / "obscura-bot.service"
+    install_dir = tmp_path / "opt" / "sui-bot"
+    config_dir = tmp_path / "etc" / "sui-bot"
+    state_dir = tmp_path / "var" / "lib" / "sui-bot"
+    service_file = tmp_path / "etc" / "systemd" / "sui-bot.service"
     command_file = tmp_path / "usr" / "local" / "bin" / "sui-bot"
     for directory in (install_dir, config_dir, state_dir):
         directory.mkdir(parents=True)

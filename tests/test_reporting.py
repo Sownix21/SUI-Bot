@@ -1,4 +1,4 @@
-from obscura_bot.reporting import expiring_clients_with_assignments
+from sui_bot.reporting import expiring_clients_with_assignments
 
 
 def test_unlinked_expiring_clients_are_preserved() -> None:

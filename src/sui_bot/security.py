@@ -38,3 +38,19 @@ def can_access_client(
         return client_id in assigned
     return assigned == client_id
 
+
+PUBLIC_CALLBACK_ACTIONS = {"language_settings", "main_menu", "my_usage"}
+PUBLIC_CALLBACK_PREFIXES = (
+    "lang_set_",
+    "my_usage_",
+    "get_sub_links_",
+    "select_sub_",
+    "renew_start_",
+    "renew_choose_",
+    "renew_cancel_",
+)
+
+
+def is_public_callback(action: str) -> bool:
+    """Return whether a callback is safe for a non-administrator to invoke."""
+    return action in PUBLIC_CALLBACK_ACTIONS or action.startswith(PUBLIC_CALLBACK_PREFIXES)

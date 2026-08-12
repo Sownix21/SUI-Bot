@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from obscura_bot.backup import BackupTooLargeError, stream_response_to_file
+from sui_bot.backup import BackupTooLargeError, stream_response_to_file
 
 
 class Content:

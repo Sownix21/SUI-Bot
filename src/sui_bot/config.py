@@ -17,11 +17,11 @@ T = TypeVar("T")
 
 
 def _load_local_env() -> None:
-    configured = os.getenv("OBSCURA_ENV_FILE")
+    configured = os.getenv("SUI_BOT_ENV_FILE")
     if configured:
         load_dotenv(configured, override=False)
         return
-    for candidate in (Path.cwd() / ".env", Path.cwd() / "obscura-bot.env"):
+    for candidate in (Path.cwd() / ".env", Path.cwd() / "sui-bot.env"):
         if candidate.is_file():
             load_dotenv(candidate, override=False)
             return

@@ -33,7 +33,10 @@ from .reporting import (
     save_expired_notification_ids,
 )
 from .runtime_settings import load_runtime_settings, save_runtime_setting
-from .security import can_access_client, validate_service_url
+from .security import can_access_client, is_public_callback, validate_service_url
+from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
+from .navigation import has_multiple_subscriptions
+from .sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata
 
 try:
     import redis.asyncio as redis
@@ -99,6 +102,8 @@ RENEWAL_MONTHLY_PRICE = int(RUNTIME_SETTINGS.get("RENEWAL_MONTHLY_PRICE", SETTIN
 RENEWAL_MONTH_OPTIONS = str(RUNTIME_SETTINGS.get("RENEWAL_MONTH_OPTIONS", SETTINGS.renewal_month_options))
 PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
+LANGUAGE_STORE_FILE = managed_data_path("user_languages.json")
+language_store = LanguageStore(LANGUAGE_STORE_FILE)
 
 # Inbounds cache constants
 INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
@@ -112,8 +117,11 @@ MONITOR_INTERVAL = 30  # Check every 30 seconds
 MIN_USERNAME_LEN = 3
 MAX_USERNAME_LEN = 32
 MAX_DESC_LEN = 120
+MAX_GROUP_LEN = 64
 MAX_BROADCAST_LEN = 2000
 MAX_CALLBACK_DATA_LEN = 64
+MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
+API_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_read=15)
 
 # Alert State tracking
 alert_state = {
@@ -384,6 +392,22 @@ rate_limiter = None
 def md_escape(value: Any) -> str:
     return escape_markdown(str(value), version=1)
 
+
+def user_language(user_id: int) -> str:
+    return language_store.get(user_id) or "en"
+
+
+def tr(user_id: int, key: str, **values: Any) -> str:
+    return translate(user_language(user_id), key, **values)
+
+
+def language_keyboard():
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"lang_set_{code}")]
+        for code, label in SUPPORTED_LANGUAGES.items()
+    ]
+    return InlineKeyboardMarkup(rows)
+
 def is_safe_callback_data(data: str) -> bool:
     if not data or len(data) > MAX_CALLBACK_DATA_LEN:
         return False
@@ -398,7 +422,21 @@ class APIClient:
 
     async def ensure_session(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(headers=self.headers)
+            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+            self.session = aiohttp.ClientSession(headers=self.headers, connector=connector, timeout=API_TIMEOUT)
+
+    @staticmethod
+    async def decode_json_response(response: aiohttp.ClientResponse) -> dict:
+        content_length = response.content_length
+        if content_length is not None and content_length > MAX_API_RESPONSE_BYTES:
+            raise ValueError("S-UI response exceeds the configured safety limit")
+        payload = await response.content.read(MAX_API_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_API_RESPONSE_BYTES:
+            raise ValueError("S-UI response exceeds the configured safety limit")
+        decoded = json.loads(payload)
+        if not isinstance(decoded, dict):
+            raise ValueError("S-UI response must be a JSON object")
+        return decoded
 
     async def close(self):
         if self.session and not self.session.closed:
@@ -408,9 +446,9 @@ class APIClient:
         await self.ensure_session()
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
-            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as response:
+            async with self.session.get(url, params=params) as response:
                 response.raise_for_status()
-                return await response.json()
+                return await self.decode_json_response(response)
         except Exception as e:
             logger.error(f"API request failed for {endpoint}: {e}")
             return None
@@ -422,9 +460,9 @@ async def create_or_edit_client(action: str, client_data: dict) -> dict:
     url = f"{api_client.base_url}/apiv2/save"
     try:
         data_payload = {"object": "clients", "action": action, "data": json.dumps(client_data)}
-        async with api_client.session.post(url, data=data_payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+        async with api_client.session.post(url, data=data_payload) as response:
             response.raise_for_status()
-            return await response.json()
+            return await api_client.decode_json_response(response)
     except Exception as e:
         logger.error(f"Failed to {action} client: {e}")
         return None
@@ -723,23 +761,38 @@ def save_cached_inbounds(inbounds):
     except Exception as e:
         logger.error(f"Failed to save inbounds cache: {e}")
 
-async def get_inbounds_list(force_refresh=False):
+async def refresh_server_metadata() -> bool:
+    """Refresh subscription URI and inbounds together from ``/apiv2/load``."""
     global inbounds_cache, inbounds_cache_time
+    data = await api_client.get('apiv2/load')
+    if not data or not data.get("success"):
+        logger.error("S-UI metadata refresh failed: /apiv2/load returned no successful response")
+        return False
+    try:
+        sub_uri, inbounds = extract_load_metadata(data)
+    except ValueError as exc:
+        logger.error("Invalid S-UI /apiv2/load response: %s", exc)
+        return False
+    save_cached_sub_uri(sub_uri)
+    inbounds_cache = inbounds
+    inbounds_cache_time = datetime.now().timestamp()
+    save_cached_inbounds(inbounds)
+    logger.info("Refreshed subURI and %s inbound(s) from /apiv2/load", len(inbounds))
+    return True
+
+
+async def get_inbounds_list(force_refresh=False):
+    global inbounds_cache
     now = datetime.now().timestamp()
 
     if not force_refresh and inbounds_cache is not None and (now - inbounds_cache_time) < INBOUNDS_CACHE_DURATION:
         return inbounds_cache
 
     try:
-        data = await api_client.get('apiv2/inbounds')
-        if data and data.get("success"):
-            inbounds_cache = data.get("obj", {}).get("inbounds", [])
-            inbounds_cache_time = now
-            save_cached_inbounds(inbounds_cache)
-            logger.info(f"Refreshed inbounds list: {len(inbounds_cache)} inbounds")
-            return inbounds_cache
+        if await refresh_server_metadata():
+            return inbounds_cache or []
     except Exception as e:
-        logger.error(f"Failed to fetch inbounds: {e}")
+        logger.error(f"Failed to fetch S-UI metadata: {e}")
 
     # Fallback to cache file if API fails
     if inbounds_cache is None:
@@ -794,16 +847,12 @@ def create_inbounds_keyboard(selected_inbounds=None, prefix="inbound"):
     return keyboard
 
 async def get_subscription_base_url(force_refresh=False) -> str:
-    global sub_base_url, sub_cache_time
+    global sub_base_url
     now = datetime.now().timestamp()
     if not force_refresh and sub_base_url and (now - sub_cache_time) < SUB_CACHE_DURATION:
         return sub_base_url
-    data = await api_client.get('apiv2/load')
-    if data:
-        sub_uri = data.get("obj", {}).get("subURI", "")
-        if sub_uri:
-            save_cached_sub_uri(sub_uri)
-            return sub_uri
+    if await refresh_server_metadata() and sub_base_url:
+        return sub_base_url
     return sub_base_url if sub_base_url else FALLBACK_SUB_URI
 
 async def refresh_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -883,32 +932,33 @@ def rate_limited(admin_only=False, track_metrics=True):
         return wrapper
     return decorator
 
-def format_client(client: dict, is_admin: bool = False) -> str:
+def format_client(client: dict, is_admin: bool = False, user_id: int | None = None) -> str:
+    uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
     name = client.get("name", "Unknown")
     volume = client.get("volume", 0)
     up = client.get("up", 0)
     down = client.get("down", 0)
     expiry = client.get("expiry", 0)
-    enable = "✅ Enable" if client.get("enable", False) else "❌ Disable"
+    enable = tr(uid, "enabled") if client.get("enable", False) else tr(uid, "disabled")
 
     lines = []
     if is_admin:
-        lines.append(f"👤 User: {name} (ID: {client.get('id', 'N/A')})")
+        lines.append(f"{tr(uid, 'user')}: {name} (ID: {client.get('id', 'N/A')})")
     else:
-        lines.append(f"👤 User: {name}")
+        lines.append(f"{tr(uid, 'user')}: {name}")
 
-    lines.append(f"Status: {enable}")
-    lines.append(f"📤 Upload: {format_bytes(up)}")
-    lines.append(f"📥 Download: {format_bytes(down)}")
+    lines.append(f"{tr(uid, 'status')}: {enable}")
+    lines.append(f"{tr(uid, 'upload')}: {format_bytes(up)}")
+    lines.append(f"{tr(uid, 'download')}: {format_bytes(down)}")
     total_used = up + down
-    lines.append(f"📊 Total Usage: {format_bytes(total_used)}")
-    volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
-    lines.append(f"💾 Total Volume: {volume_str}")
-    lines.append(f"⏰ Expiry: {calculate_remaining_time(expiry)}")
+    lines.append(f"{tr(uid, 'total_usage')}: {format_bytes(total_used)}")
+    volume_str = tr(uid, "unlimited") if volume == 0 else format_bytes(volume)
+    lines.append(f"{tr(uid, 'total_volume')}: {volume_str}")
+    lines.append(f"{tr(uid, 'expiry')}: {calculate_remaining_time(expiry)}")
 
     if is_admin:
-        lines.append(f"📝 Description: {client.get('desc', 'N/A')}")
-        lines.append(f"👥 Group: {client.get('group', 'N/A')}")
+        lines.append(f"{tr(uid, 'description')}: {client.get('desc', 'N/A')}")
+        lines.append(f"{tr(uid, 'group')}: {client.get('group', 'N/A')}")
 
     return "\n".join(lines)
 
@@ -1101,19 +1151,36 @@ async def settings_card_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("❌ Settings edit canceled.", reply_markup=build_settings_menu_keyboard())
     return ConversationHandler.END
 
-def get_main_menu_keyboard(is_admin=False):
-    keyboard = [[InlineKeyboardButton("📊 My Subscription(اشتراک من)", callback_data='my_usage')]]
+def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
+    uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
+    subscription_key = "my_subscriptions" if has_multiple_subscriptions(telegram_clients, uid) else "my_subscription"
+    keyboard = [[InlineKeyboardButton(tr(uid, subscription_key), callback_data='my_usage')]]
     if is_admin:
         keyboard.extend([
-            [InlineKeyboardButton("👥 All Users", callback_data='all_clients_page_1'), InlineKeyboardButton("🌐 Online Users", callback_data='online_users')],
-            [InlineKeyboardButton("💻 Server Status", callback_data='server_status'), InlineKeyboardButton("📊 Bot Stats", callback_data='bot_stats')],
-            [InlineKeyboardButton("🔗 Links", callback_data='manage_links'), InlineKeyboardButton("📢 Broadcast", callback_data='broadcast_message')],
-            [InlineKeyboardButton("🔍 Inactive Users", callback_data='check_inactive_users'), InlineKeyboardButton("🗑️ Delete User", callback_data='delete_user_prompt')],
-            [InlineKeyboardButton("➕ Create User", callback_data='create_user_prompt'), InlineKeyboardButton("📝 Edit User", callback_data='edit_user_prompt')],
-            [InlineKeyboardButton("🔄 Update", callback_data='refresh_sub')],
-            [InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings')]
+            [InlineKeyboardButton(tr(uid, "all_users"), callback_data='all_clients_page_1'), InlineKeyboardButton(tr(uid, "online_users"), callback_data='online_users')],
+            [InlineKeyboardButton(tr(uid, "server_status"), callback_data='server_status'), InlineKeyboardButton(tr(uid, "bot_stats"), callback_data='bot_stats')],
+            [InlineKeyboardButton(tr(uid, "links"), callback_data='manage_links'), InlineKeyboardButton(tr(uid, "broadcast"), callback_data='broadcast_message')],
+            [InlineKeyboardButton(tr(uid, "inactive_users"), callback_data='check_inactive_users'), InlineKeyboardButton(tr(uid, "delete_user"), callback_data='delete_user_prompt')],
+            [InlineKeyboardButton(tr(uid, "create_user"), callback_data='create_user_prompt'), InlineKeyboardButton(tr(uid, "edit_user"), callback_data='edit_user_prompt')],
+            [InlineKeyboardButton(tr(uid, "refresh"), callback_data='refresh_sub')],
+            [InlineKeyboardButton(tr(uid, "settings"), callback_data='admin_settings')]
         ])
+    keyboard.append([InlineKeyboardButton(tr(uid, "language"), callback_data='language_settings')])
     return InlineKeyboardMarkup(keyboard)
+
+
+def subscription_keyboard(user_id: int, client_id: int, web_panel_url: str):
+    keyboard = [
+        [InlineKeyboardButton(tr(user_id, "my_links"), callback_data=f'get_sub_links_{client_id}')],
+        [InlineKeyboardButton(tr(user_id, "refresh"), callback_data=f'my_usage_{client_id}')],
+        [InlineKeyboardButton(tr(user_id, "renew"), callback_data=f'renew_start_{client_id}')],
+        [InlineKeyboardButton(tr(user_id, "web_panel"), url=web_panel_url)],
+    ]
+    if has_multiple_subscriptions(telegram_clients, user_id):
+        keyboard.append([InlineKeyboardButton(tr(user_id, "back_subscriptions"), callback_data='my_usage')])
+    keyboard.append([InlineKeyboardButton(tr(user_id, "main_menu"), callback_data='main_menu')])
+    return InlineKeyboardMarkup(keyboard)
+
 
 def get_pagination_keyboard(current_page: int, total_pages: int, prefix: str):
     keyboard = []
@@ -1130,9 +1197,12 @@ def get_pagination_keyboard(current_page: int, total_pages: int, prefix: str):
 @rate_limited(admin_only=False)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if language_store.get(user_id) is None:
+        await update.message.reply_text(translate("en", "choose_language"), reply_markup=language_keyboard())
+        return
     is_admin = (user_id == ADMIN_TELEGRAM_ID)
-    welcome_msg = "🤖 Welcome To SUI Bot\n\nChoose The Desired Option Below:"
-    keyboard = get_main_menu_keyboard(is_admin)
+    welcome_msg = tr(user_id, "welcome")
+    keyboard = get_main_menu_keyboard(is_admin, user_id)
     await update.message.reply_text(welcome_msg, reply_markup=keyboard)
 
 @rate_limited(admin_only=False)
@@ -1140,30 +1210,22 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     client_ids = telegram_clients.get(tg_id)
     if not client_ids:
-        await update.message.reply_text("❌ Bot Is Not Active For You , Contact Admin")
+        await update.message.reply_text(tr(tg_id, "not_active"))
         return
 
     if len(client_ids) == 1:
         # Single subscription - show directly
         client_id = client_ids[0]
         is_admin_user = (tg_id == ADMIN_TELEGRAM_ID)
-        usage_msg = await get_client_usage_for_display(client_id, is_admin_user)
+        usage_msg = await get_client_usage_for_display(client_id, is_admin_user, tg_id)
 
         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
         clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
         username = clients[0].get("name", "Unknown") if clients else "Unknown"
         base_url = await get_subscription_base_url()
-        domain = base_url.split("://")[1].split("/")[0].split(":")[0]
-        web_panel_url = f"https://{domain}:2083/dF84Xaql5O9b1/{username}"
+        web_panel_url = build_web_panel_url(base_url, username)
 
-        keyboard = [
-            [InlineKeyboardButton("🔗 My Links(لینک های اشتراک)", callback_data=f'get_sub_links_{client_id}')],
-            [InlineKeyboardButton("🔄 Update(بروزرسانی)", callback_data=f'my_usage_{client_id}')],
-            [InlineKeyboardButton("💳 Renew Subscription(تمدید اشتراک)", callback_data=f'renew_start_{client_id}')],
-            [InlineKeyboardButton("🌐 Web Panel(پنل وب)", url=web_panel_url)],
-            [InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')]
-        ]
-        await update.message.reply_text(usage_msg, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(usage_msg, reply_markup=subscription_keyboard(tg_id, client_id, web_panel_url))
     else:
         # Multiple subscriptions - show selection menu
         keyboard = []
@@ -1181,15 +1243,14 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f'select_sub_{client_id}')])
 
-        keyboard.append([InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')])
+        keyboard.append([InlineKeyboardButton(tr(tg_id, "main_menu"), callback_data='main_menu')])
 
         await update.message.reply_text(
-            f"📋 You have {len(client_ids)} subscriptions. Please select one:\n\n"
-            f"شما {len(client_ids)} اشتراک دارید. لطفاً یکی را انتخاب کنید:",
+            tr(tg_id, "select_subscription", count=len(client_ids)),
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-async def get_client_usage_for_display(client_id: int, is_admin: bool) -> str:
+async def get_client_usage_for_display(client_id: int, is_admin: bool, user_id: int | None = None) -> str:
     try:
         data = await api_client.get('apiv2/clients', {'id': client_id})
         if not data:
@@ -1198,7 +1259,7 @@ async def get_client_usage_for_display(client_id: int, is_admin: bool) -> str:
         if not clients:
             return "❌ User Not Found."
         client = clients[0]
-        return format_client(client, is_admin=is_admin)
+        return format_client(client, is_admin=is_admin, user_id=user_id)
     except Exception as e:
         logger.exception("Error in get_client_usage_for_display")
         return f"❌ Error: {e}"
@@ -1491,26 +1552,22 @@ async def create_user_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Description Must Be At Most {MAX_DESC_LEN} Characters.")
         return CREATE_USER_DESC
     context.user_data['new_client_desc'] = desc
-    keyboard = [
-        [InlineKeyboardButton("👨‍👩‍👧‍👦 Family", callback_data='group_Family')],
-        [InlineKeyboardButton("👥 Friends", callback_data='group_Friends')],
-        [InlineKeyboardButton("❌ Abort", callback_data='create_cancel')]
-    ]
     await update.message.reply_text(
         f"✅ Description: {desc}\n\n"
-        "👥 Choose a Group:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "👥 Type a group name:\n"
+        f"(Maximum {MAX_GROUP_LEN} characters)\n\n"
+        "Abort: /cancel"
     )
     return CREATE_USER_GROUP
 
 async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == 'create_cancel':
-        await query.edit_message_text("❌ Operation Aborted.")
-        context.user_data.clear()
-        return ConversationHandler.END
-    group = query.data.split('_')[1]
+    group = update.message.text.strip()
+    if not group:
+        await update.message.reply_text("❌ Group cannot be empty. Type a group name:")
+        return CREATE_USER_GROUP
+    if len(group) > MAX_GROUP_LEN:
+        await update.message.reply_text(f"❌ Group must be at most {MAX_GROUP_LEN} characters.")
+        return CREATE_USER_GROUP
     context.user_data['new_client_group'] = group
     name = context.user_data['new_client_name']
     inbounds = context.user_data['selected_inbounds']
@@ -1520,7 +1577,7 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
     expiry_str = "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
     selected_names = [get_inbound_display_name(i) for i in inbounds]
-    await query.edit_message_text(
+    await update.message.reply_text(
         "⏳ Creating User...\n\n"
         f"👤 Username: {name}\n"
         f"📡 Inbounds: {', '.join(selected_names)}\n"
@@ -1543,7 +1600,7 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         global clients_cache, clients_cache_time
         clients_cache = None
         clients_cache_time = 0
-        await query.edit_message_text(
+        await update.message.reply_text(
             "✅ User Created Successfully.\n\n"
             f"👤 Username: {name}\n"
             f"📡 Inbounds: {', '.join(selected_names)}\n"
@@ -1555,7 +1612,7 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         error_msg = result.get('msg', 'Unknown Error') if result else 'Server Unresponsive'
-        await query.edit_message_text(
+        await update.message.reply_text(
             f"❌ Failed To Create User:\n{error_msg}\n\n"
             "Try Again: /createuser"
         )
@@ -1572,9 +1629,9 @@ async def delete_client(client_id: int) -> dict:
     url = f"{api_client.base_url}/apiv2/save"
     try:
         data_payload = {"object": "clients", "action": "del", "data": str(client_id)}
-        async with api_client.session.post(url, data=data_payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+        async with api_client.session.post(url, data=data_payload) as response:
             response.raise_for_status()
-            return await response.json()
+            return await api_client.decode_json_response(response)
     except Exception as e:
         logger.error(f"Failed to delete client {client_id}: {e}")
         return None
@@ -1845,27 +1902,25 @@ async def edit_user_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['edited_client_desc'] = desc
 
     current_group = context.user_data['edited_client_group']
-    keyboard = [
-        [InlineKeyboardButton(f"👨‍👩‍👧‍👦 Family {'✅' if current_group == 'Family' else ''}", callback_data='edit_group_Family')],
-        [InlineKeyboardButton(f"👥 Friends {'✅' if current_group == 'Friends' else ''}", callback_data='edit_group_Friends')],
-        [InlineKeyboardButton("❌ Abort", callback_data='edit_cancel')]
-    ]
     await update.message.reply_text(
         f"✅ Description: {desc}\n\n"
-        "👥 Choose a New Group:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "👥 Type a new group name:\n"
+        f"(Current: {current_group or 'empty'}; send '.' to keep it)\n"
+        f"(Maximum {MAX_GROUP_LEN} characters)\n\n"
+        "Abort: /cancel"
     )
     return EDIT_USER_GROUP
 
 async def edit_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == 'edit_cancel':
-        await query.edit_message_text("❌ Operation Aborted.")
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    group = query.data.split('_')[2]
+    group = update.message.text.strip()
+    if group == '.':
+        group = str(context.user_data.get('edited_client_group') or '')
+    elif not group:
+        await update.message.reply_text("❌ Group cannot be empty. Type a group name or '.' to keep it:")
+        return EDIT_USER_GROUP
+    if len(group) > MAX_GROUP_LEN:
+        await update.message.reply_text(f"❌ Group must be at most {MAX_GROUP_LEN} characters.")
+        return EDIT_USER_GROUP
     context.user_data['edited_client_group'] = group
 
     current_enable_status = context.user_data['edited_client_enable']
@@ -1874,7 +1929,7 @@ async def edit_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"❌ Disable {'✅' if not current_enable_status else ''}", callback_data='edit_enable_false')],
         [InlineKeyboardButton("❌ Abort", callback_data='edit_cancel')]
     ]
-    await query.edit_message_text(
+    await update.message.reply_text(
         f"✅ Group: {group}\n\n"
         "⚡ Choose Active/Deactive State Of The User:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2094,12 +2149,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_safe_callback_data(data):
         await query.answer("❌ Invalid action.", show_alert=True)
         return
+    if user_id != ADMIN_TELEGRAM_ID and not is_public_callback(data):
+        await query.answer("❌ Admin only", show_alert=True)
+        return
     metrics.record_command(user_id, f"button_{data}")
     try:
-        if data == 'main_menu':
+        if data == 'language_settings':
+            await query.edit_message_text(tr(user_id, "choose_language"), reply_markup=language_keyboard())
+        elif data.startswith('lang_set_'):
+            language = data.removeprefix('lang_set_')
+            if language not in SUPPORTED_LANGUAGES:
+                await query.answer("Invalid language", show_alert=True)
+                return
+            await asyncio.to_thread(language_store.set, user_id, language)
+            is_admin = user_id == ADMIN_TELEGRAM_ID
+            await query.edit_message_text(
+                f"{tr(user_id, 'language_saved')}\n\n{tr(user_id, 'welcome')}",
+                reply_markup=get_main_menu_keyboard(is_admin, user_id),
+            )
+        elif data == 'main_menu':
             is_admin = (user_id == ADMIN_TELEGRAM_ID)
-            keyboard = get_main_menu_keyboard(is_admin)
-            await query.edit_message_text("🤖 Main Menu\nChoose The Desired Option:", reply_markup=keyboard)
+            keyboard = get_main_menu_keyboard(is_admin, user_id)
+            await query.edit_message_text(tr(user_id, "welcome"), reply_markup=keyboard)
         elif data == 'admin_settings':
             if user_id != ADMIN_TELEGRAM_ID:
                 await query.answer("❌ Only admin", show_alert=True)
@@ -2217,25 +2288,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.answer("❌ You don't have access to this subscription.", show_alert=True)
                     return
                 is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-                new_usage_msg = await get_client_usage_for_display(client_id, is_admin_user)
+                new_usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
 
                 # Get web panel URL
                 data_obj = await api_client.get('apiv2/clients', {'id': client_id})
                 clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
                 username = clients[0].get("name", "Unknown") if clients else "Unknown"
                 base_url = await get_subscription_base_url()
-                domain = base_url.split("://")[1].split("/")[0].split(":")[0]
-                web_panel_url = f"https://{domain}:2083/dF84Xaql5O9b1/{username}"
+                web_panel_url = build_web_panel_url(base_url, username)
 
-                new_keyboard = [
-                    [InlineKeyboardButton("🔗 My Links(لینک های اشتراک)", callback_data=f'get_sub_links_{client_id}')],
-                    [InlineKeyboardButton("🔄 Update(بروزرسانی)", callback_data=f'my_usage_{client_id}')],
-                    [InlineKeyboardButton("💳 Renew Subscription(تمدید اشتراک)", callback_data=f'renew_start_{client_id}')],
-                    [InlineKeyboardButton("🌐 Web Panel(پنل وب)", url=web_panel_url)],
-                    [InlineKeyboardButton("🔙 Back to Subscriptions(بازگشت به اشتراک‌ها)", callback_data='my_usage')],
-                    [InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')]
-                ]
-                new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+                new_reply_markup = subscription_keyboard(user_id, client_id, web_panel_url)
 
                 try:
                    await query.edit_message_text(new_usage_msg, reply_markup=new_reply_markup)
@@ -2255,24 +2317,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Single subscription - show directly
                         client_id = client_ids[0]
                         is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-                        usage_msg = await get_client_usage_for_display(client_id, is_admin_user)
+                        usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
 
                         # Get web panel URL
                         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
                         clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
                         username = clients[0].get("name", "Unknown") if clients else "Unknown"
                         base_url = await get_subscription_base_url()
-                        domain = base_url.split("://")[1].split("/")[0].split(":")[0]
-                        web_panel_url = f"https://{domain}:2083/dF84Xaql5O9b1/{username}"
+                        web_panel_url = build_web_panel_url(base_url, username)
 
-                        keyboard = [
-                            [InlineKeyboardButton("🔗 My Links(لینک های اشتراک)", callback_data=f'get_sub_links_{client_id}')],
-                            [InlineKeyboardButton("🔄 Update(بروزرسانی)", callback_data=f'my_usage_{client_id}')],
-                            [InlineKeyboardButton("💳 Renew Subscription(تمدید اشتراک)", callback_data=f'renew_start_{client_id}')],
-                            [InlineKeyboardButton("🌐 Web Panel(پنل وب)", url=web_panel_url)],
-                            [InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')]
-                        ]
-                        await query.edit_message_text(usage_msg, reply_markup=InlineKeyboardMarkup(keyboard))
+                        await query.edit_message_text(
+                            usage_msg,
+                            reply_markup=subscription_keyboard(user_id, client_id, web_panel_url),
+                        )
                     else:
                         # Multiple subscriptions - show selection menu
                         keyboard = []
@@ -2290,11 +2347,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                             keyboard.append([InlineKeyboardButton(button_text, callback_data=f'select_sub_{client_id}')])
 
-                        keyboard.append([InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')])
+                        keyboard.append([InlineKeyboardButton(tr(user_id, "main_menu"), callback_data='main_menu')])
 
                         await query.edit_message_text(
-                            f"📋 You have {len(client_ids)} subscriptions. Please select one:\n\n"
-                            f"شما {len(client_ids)} اشتراک دارید. لطفاً یکی را انتخاب کنید:",
+                            tr(user_id, "select_subscription", count=len(client_ids)),
                             reply_markup=InlineKeyboardMarkup(keyboard)
                         )
 
@@ -2327,28 +2383,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             name = clients[0].get("name", "Unknown")
             base_url = await get_subscription_base_url()
-            if "://" in base_url:
-                protocol, rest = base_url.split("://", 1)
-                domain_part = rest.split("/")[0]
-                domain_without_port = domain_part.split(":")[0]
-                path_parts = rest.split("/")[1:] if "/" in rest else []
-                safe_base = f"{protocol}://{domain_without_port}"
-                if path_parts:
-                    safe_base += "/" + "/".join(path_parts)
-            else:
-                safe_base = base_url.rstrip("/")
-
-            main_url = f"{safe_base}/{name}/"
-            json_url = f"{safe_base}/{name}/?format=json"
-            clash_url = f"{safe_base}/{name}/?format=clash"
+            main_url, json_url, clash_url = build_subscription_urls(base_url, name)
             msg = (
-                "🔗 Your Subscription Links\n\n"
+                f"{tr(user_id, 'subscription_links')}\n\n"
                 f"🌐 Main URL (V2rayNG & ETC):\n<code>{html.escape(main_url)}</code>\n\n"
                 f"📄 JSON (Sing-Box & Karing APP):\n<code>{html.escape(json_url)}</code>\n\n"
                 f"⚔️ Clash (Only MI Clash APP):\n<code>{html.escape(clash_url)}</code>\n\n"
-                "💡 Use These Links In The Designated App."
+                f"{tr(user_id, 'use_links')}"
             )
-            keyboard = [[InlineKeyboardButton("🔙 Return(بازگشت)", callback_data=f'select_sub_{client_id}')]]
+            keyboard = [[InlineKeyboardButton(tr(user_id, "back"), callback_data=f'select_sub_{client_id}')]]
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
         elif data.startswith('select_sub_'):
@@ -2357,25 +2400,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ You don't have access to this subscription.", show_alert=True)
                 return
             is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-            usage_msg = await get_client_usage_for_display(client_id, is_admin_user)
+            usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
 
             # Get web panel URL
             data_obj = await api_client.get('apiv2/clients', {'id': client_id})
             clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
             username = clients[0].get("name", "Unknown") if clients else "Unknown"
             base_url = await get_subscription_base_url()
-            domain = base_url.split("://")[1].split("/")[0].split(":")[0]
-            web_panel_url = f"https://{domain}:2083/dF84Xaql5O9b1/{username}"
+            web_panel_url = build_web_panel_url(base_url, username)
 
-            keyboard = [
-                [InlineKeyboardButton("🔗 My Links(لینک های اشتراک)", callback_data=f'get_sub_links_{client_id}')],
-                [InlineKeyboardButton("🔄 Update(بروزرسانی)", callback_data=f'my_usage_{client_id}')],
-                [InlineKeyboardButton("💳 Renew Subscription(تمدید اشتراک)", callback_data=f'renew_start_{client_id}')],
-                [InlineKeyboardButton("🌐 Web Panel(پنل وب)", url=web_panel_url)],
-                [InlineKeyboardButton("🔙 Back to Subscriptions(بازگشت به اشتراک‌ها)", callback_data='my_usage')],
-                [InlineKeyboardButton("🏠 Main Menu(منوی اصلی)", callback_data='main_menu')]
-            ]
-            await query.edit_message_text(usage_msg, reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(
+                usage_msg,
+                reply_markup=subscription_keyboard(user_id, client_id, web_panel_url),
+            )
         elif data.startswith('renew_start_'):
             client_id = int(data.split('_')[-1])
             if not user_has_client_access(user_id, client_id):
@@ -4221,6 +4258,12 @@ async def main():
     load_assignments()
     load_cached_sub_uri()
     inbounds_cache = load_cached_inbounds()
+    try:
+        refreshed = await refresh_server_metadata()
+        if not refreshed:
+            logger.warning("Startup metadata refresh failed; cached subscription URI/inbounds remain active")
+    except Exception:
+        logger.exception("Startup metadata refresh failed; cached subscription URI/inbounds remain active")
 
     metrics.metrics['start_time'] = datetime.now().isoformat()
     metrics.save_metrics()
@@ -4248,7 +4291,7 @@ async def main():
             CREATE_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_volume), CallbackQueryHandler(create_user_volume)],
             CREATE_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_expiry), CallbackQueryHandler(create_user_expiry)],
             CREATE_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_desc)],
-            CREATE_USER_GROUP: [CallbackQueryHandler(create_user_group)]
+            CREATE_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_group)]
         },
         fallbacks=[CommandHandler('cancel', create_user_cancel)],
         allow_reentry=True
@@ -4263,7 +4306,7 @@ async def main():
             EDIT_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_volume), CallbackQueryHandler(edit_user_volume)],
             EDIT_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_expiry), CallbackQueryHandler(edit_user_expiry)],
             EDIT_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_desc)],
-            EDIT_USER_GROUP: [CallbackQueryHandler(edit_user_group)],
+            EDIT_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_group)],
             EDIT_USER_ENABLE: [CallbackQueryHandler(edit_user_enable)],
             EDIT_USER_REGEN: [CallbackQueryHandler(edit_user_regen)]
         },
