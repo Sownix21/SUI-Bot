@@ -9,15 +9,13 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 - Create, edit, enable, disable, and delete S-UI clients.
 - Assign one or more subscriptions to a Telegram account.
 - Display usage, expiry, status, subscription links, and web-panel links.
-- Accept free-form group names when creating or editing clients.
 - Handle renewal plans, payment receipts, approval, and rejection.
-- Show payment card numbers left-to-right and as tap-to-copy inline code in every language.
 - Send broadcasts and expiry reminders.
 - Create size-limited database backups and report server health.
 - Export and restore bot assignments, user preferences, metrics, runtime configuration, and cached state as one validated file.
 - Support English, Persian, Russian, and Chinese per Telegram account.
-- Let each owner customize the name used inside bot messages without changing the Telegram profile.
-- Optionally hide the explicit port in user-facing subscription links after a reverse-proxy warning and confirmation.
+- Let each owner customize the name used inside bot messages .
+- Optionally hide the explicit port in user-facing subscription links .
 - Run continuously as a hardened systemd service.
 - Provide a global `sui-bot` management command.
 
@@ -157,24 +155,6 @@ Updates replace the application and virtual environment but preserve:
 - `/etc/sui-bot/sui-bot.env`
 - `/var/lib/sui-bot`
 - assignments, language choices, caches, metrics, settings, and backups stored inside the state directory
-
-You do not need to copy these files again during later SUI Bot updates.
-
-### One-time migration from the earlier installation layout
-
-The previous service layout used a different state directory. Installing this release does not automatically merge that directory with `/var/lib/sui-bot`. If your data is still in `/var/lib/obscura-bot`, perform this one-time migration:
-
-```bash
-sudo systemctl disable --now obscura-bot.service
-sudo systemctl stop sui-bot.service
-sudo cp -a /var/lib/obscura-bot/. /var/lib/sui-bot/
-sudo chown -R sui-bot:sui-bot /var/lib/sui-bot
-sudo chmod -R u+rwX,g+rX,o-rwx /var/lib/sui-bot
-sudo systemctl restart sui-bot.service
-sudo sui-bot doctor
-```
-
-Do this before creating new assignments in SUI Bot because copying the legacy directory can overwrite newer state files. Once the data is under `/var/lib/sui-bot`, future updates preserve it automatically.
 
 ## Important files and directories
 
