@@ -22,5 +22,5 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - run: python -m compileall -q src
+      - run: ruff check src tests
       - run: pytest
-

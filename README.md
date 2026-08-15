@@ -26,6 +26,8 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 
 Python, the isolated virtual environment, Python packages, and Git are installed or configured by the installer when supported by the Linux distribution.
 
+Redis is optional and disabled by default, so a normal installation does not emit Redis connection warnings. Set `REDIS_ENABLED=true` only when a reachable Redis server has been configured.
+
 ## Install with one command
 
 Run:

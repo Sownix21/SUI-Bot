@@ -10,7 +10,7 @@ def valid_environment() -> dict[str, str]:
     return {
         "SUI_HOST": "https://panel.example.com",
         "SUI_TOKEN": "sui-secret",
-        "BOT_TOKEN": "123456:telegram-secret",
+        "BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz_ABCD",
         "ADMIN_TELEGRAM_ID": "123456",
         "ALLOW_INSECURE_HTTP": "false",
     }
@@ -24,6 +24,21 @@ def test_validation_rejects_remote_plain_http() -> None:
     values = valid_environment()
     values["SUI_HOST"] = "http://panel.example.com"
     assert any("HTTPS" in error for error in cli.validate_environment(values))
+
+
+def test_validation_rejects_invalid_token_and_runtime_bounds() -> None:
+    values = valid_environment()
+    values.update({"BOT_TOKEN": "not-a-token", "ITEMS_PER_PAGE": "0", "REDIS_PORT": "70000"})
+    errors = cli.validate_environment(values)
+    assert any("BOT_TOKEN" in error for error in errors)
+    assert any("ITEMS_PER_PAGE" in error for error in errors)
+    assert any("REDIS_PORT" in error for error in errors)
+
+
+def test_validation_rejects_state_path_traversal() -> None:
+    values = valid_environment()
+    values["BACKUP_DIR"] = "../../outside"
+    assert any("BACKUP_DIR" in error for error in cli.validate_environment(values))
 
 
 def test_secret_masking() -> None:

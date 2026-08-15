@@ -63,6 +63,7 @@ class Settings:
     max_requests_per_window: int
     rate_limit_seconds: int
     block_duration: int
+    redis_enabled: bool
     redis_host: str
     redis_port: int
     redis_db: int
@@ -79,7 +80,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        return cls(
+        settings = cls(
             sui_host=str(env("SUI_HOST", required=True)),
             sui_token=str(env("SUI_TOKEN", required=True)),
             bot_token=str(env("BOT_TOKEN", required=True)),
@@ -93,6 +94,7 @@ class Settings:
             max_requests_per_window=env("MAX_REQUESTS_PER_WINDOW", 10, cast=int),
             rate_limit_seconds=env("RATE_LIMIT_SECONDS", 1, cast=int),
             block_duration=env("BLOCK_DURATION", 3600, cast=int),
+            redis_enabled=env_bool("REDIS_ENABLED", False),
             redis_host=str(env("REDIS_HOST", "localhost")),
             redis_port=env("REDIS_PORT", 6379, cast=int),
             redis_db=env("REDIS_DB", 0, cast=int),
@@ -107,6 +109,37 @@ class Settings:
             payment_card_number=str(env("PAYMENT_CARD_NUMBER", "0000-0000-0000-0000")),
             payment_card_holder=str(env("PAYMENT_CARD_HOLDER", "")),
         )
+        settings.validate()
+        return settings
+
+    def validate(self) -> None:
+        positive = {
+            "ADMIN_TELEGRAM_ID": self.admin_telegram_id,
+            "ADMIN_CLIENT_ID": self.admin_client_id,
+            "BACKUP_MAX_BYTES": self.backup_max_bytes,
+            "RATE_LIMIT_WINDOW": self.rate_limit_window,
+            "MAX_REQUESTS_PER_WINDOW": self.max_requests_per_window,
+            "BLOCK_DURATION": self.block_duration,
+            "ITEMS_PER_PAGE": self.items_per_page,
+            "SUB_CACHE_DURATION": self.sub_cache_duration,
+            "REMINDER_COOLDOWN": self.reminder_cooldown,
+            "RENEWAL_MONTHLY_PRICE": self.renewal_monthly_price,
+        }
+        for name, value in positive.items():
+            if value <= 0:
+                raise RuntimeError(f"{name} must be a positive integer")
+        if self.rate_limit_seconds < 0:
+            raise RuntimeError("RATE_LIMIT_SECONDS must be a non-negative integer")
+        if not 1 <= self.redis_port <= 65535:
+            raise RuntimeError("REDIS_PORT must be between 1 and 65535")
+        if self.redis_db < 0:
+            raise RuntimeError("REDIS_DB must be a non-negative integer")
+        try:
+            renewal_months = [int(value.strip()) for value in self.renewal_month_options.split(",") if value.strip()]
+        except ValueError as exc:
+            raise RuntimeError("RENEWAL_MONTH_OPTIONS must contain comma-separated positive integers") from exc
+        if not renewal_months or any(month <= 0 for month in renewal_months):
+            raise RuntimeError("RENEWAL_MONTH_OPTIONS must contain comma-separated positive integers")
 
 
 _load_local_env()

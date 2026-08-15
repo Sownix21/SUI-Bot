@@ -38,7 +38,15 @@ install -d -m 0755 "${INSTALL_DIR}"
 install -d -m 0750 -o root -g sui-bot "${CONFIG_DIR}"
 install -d -m 0750 -o sui-bot -g sui-bot "${STATE_DIR}"
 if [[ ${SOURCE_DIR} != ${INSTALL_DIR} ]]; then
-  cp -a "${SOURCE_DIR}/." "${INSTALL_DIR}/"
+  # Copy only release files. Local .env files, Git metadata, caches, and test
+  # artifacts must never become part of the system installation.
+  rm -rf "${INSTALL_DIR}/src" "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/scripts"
+  cp -a "${SOURCE_DIR}/src" "${SOURCE_DIR}/deploy" "${SOURCE_DIR}/scripts" "${INSTALL_DIR}/"
+  for release_file in pyproject.toml README.md LICENSE .env.example; do
+    if [[ -f ${SOURCE_DIR}/${release_file} ]]; then
+      cp -a "${SOURCE_DIR}/${release_file}" "${INSTALL_DIR}/${release_file}"
+    fi
+  done
 fi
 rm -rf "${INSTALL_DIR}/.venv"
 
@@ -100,6 +108,7 @@ if [[ ! -f ${ENV_FILE} ]]; then
     write_env_value BOT_TOKEN "${bot_token}"
     write_env_value ADMIN_TELEGRAM_ID "${admin_id}"
     write_env_value ALLOW_INSECURE_HTTP "false"
+    write_env_value REDIS_ENABLED "false"
   else
     install -m 0600 -o root -g sui-bot "${SOURCE_DIR}/.env.example" "${ENV_FILE}"
     echo "Created ${ENV_FILE}; replace placeholder values, then run this installer again." >&2
@@ -115,6 +124,13 @@ install -m 0644 "${SOURCE_DIR}/deploy/systemd/sui-bot.service" "${SERVICE_FILE}"
 systemctl daemon-reload
 systemctl enable sui-bot.service
 systemctl restart sui-bot.service
+sleep 2
+
+if ! systemctl is-active --quiet sui-bot.service; then
+  echo "SUI Bot failed to remain active. Recent service logs:" >&2
+  journalctl -u sui-bot.service -n 30 --no-pager >&2 || true
+  exit 1
+fi
 
 echo "SUI Bot installed and started."
 echo "Status: systemctl status sui-bot"

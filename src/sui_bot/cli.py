@@ -6,6 +6,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ EDITABLE_FIELDS = [
     ("ADMIN_TELEGRAM_ID", "Admin Telegram ID"),
     ("ADMIN_CLIENT_ID", "Admin client ID"),
     ("ALLOW_INSECURE_HTTP", "Allow insecure HTTP"),
+    ("REDIS_ENABLED", "Enable Redis rate limiting"),
     ("REDIS_HOST", "Redis host"),
     ("REDIS_PORT", "Redis port"),
     ("REDIS_DB", "Redis database"),
@@ -130,6 +132,9 @@ def _bool_value(value: str) -> bool:
 
 def validate_environment(values: dict[str, str]) -> list[str]:
     errors = [f"Missing required value: {key}" for key in sorted(REQUIRED_KEYS) if not values.get(key, "").strip()]
+    bot_token = values.get("BOT_TOKEN", "").strip()
+    if bot_token and re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", bot_token) is None:
+        errors.append("BOT_TOKEN does not have a valid Telegram bot-token format")
     try:
         admin_id = int(values.get("ADMIN_TELEGRAM_ID", "0"))
         if admin_id <= 0:
@@ -142,13 +147,51 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_service_url(values["SUI_HOST"], allow_insecure_http=allow_http)
     except (RuntimeError, ValueError) as exc:
         errors.append(str(exc))
-    for key in ("ADMIN_CLIENT_ID", "REDIS_PORT", "REDIS_DB", "BACKUP_MAX_BYTES", "RENEWAL_MONTHLY_PRICE"):
+    for boolean_key in ("REDIS_ENABLED",):
+        try:
+            _bool_value(values.get(boolean_key, "false"))
+        except ValueError:
+            errors.append(f"{boolean_key} must be true or false")
+    positive_keys = (
+        "ADMIN_CLIENT_ID", "BACKUP_MAX_BYTES", "RATE_LIMIT_WINDOW", "MAX_REQUESTS_PER_WINDOW",
+        "BLOCK_DURATION", "ITEMS_PER_PAGE", "SUB_CACHE_DURATION", "REMINDER_COOLDOWN",
+        "RENEWAL_MONTHLY_PRICE",
+    )
+    for key in positive_keys:
+        if values.get(key):
+            try:
+                if int(values[key]) <= 0:
+                    raise ValueError
+            except ValueError:
+                errors.append(f"{key} must be a positive integer")
+    for key in ("REDIS_DB", "RATE_LIMIT_SECONDS"):
         if values.get(key):
             try:
                 if int(values[key]) < 0:
                     raise ValueError
             except ValueError:
                 errors.append(f"{key} must be a non-negative integer")
+    if values.get("REDIS_PORT"):
+        try:
+            if not 1 <= int(values["REDIS_PORT"]) <= 65535:
+                raise ValueError
+        except ValueError:
+            errors.append("REDIS_PORT must be between 1 and 65535")
+    if values.get("RENEWAL_MONTH_OPTIONS"):
+        try:
+            months = [int(item.strip()) for item in values["RENEWAL_MONTH_OPTIONS"].split(",") if item.strip()]
+            if not months or any(month <= 0 for month in months):
+                raise ValueError
+        except ValueError:
+            errors.append("RENEWAL_MONTH_OPTIONS must contain comma-separated positive integers")
+    state_root = STATE_DIR.resolve()
+    for key in ("BACKUP_DIR", "ASSIGNMENTS_FILE", "METRICS_FILE", "SUB_CACHE_FILE"):
+        if not values.get(key, "").strip():
+            continue
+        configured = Path(values[key])
+        resolved = configured.resolve() if configured.is_absolute() else (state_root / configured).resolve()
+        if resolved != state_root and state_root not in resolved.parents:
+            errors.append(f"{key} must stay inside {STATE_DIR}")
     return errors
 
 

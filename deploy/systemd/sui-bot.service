@@ -2,6 +2,8 @@
 Description=SUI Bot Telegram Administration Service
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -14,8 +16,12 @@ Environment=BOT_LOG_FILE=
 Environment=DATA_DIR=/var/lib/sui-bot
 ExecStart=/opt/sui-bot/.venv/bin/python -m sui_bot
 Restart=on-failure
-RestartSec=5s
+RestartPreventExitStatus=78
+RestartSec=10s
 TimeoutStopSec=30s
+SyslogIdentifier=sui-bot
+StandardOutput=journal
+StandardError=journal
 
 # systemd creates this writable directory as /var/lib/sui-bot.
 StateDirectory=sui-bot

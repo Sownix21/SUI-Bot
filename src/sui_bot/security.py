@@ -8,16 +8,27 @@ from urllib.parse import urlsplit
 
 
 def validate_service_url(url: str, *, allow_insecure_http: bool = False) -> str:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if not isinstance(url, str) or not url or url != url.strip() or any(character.isspace() for character in url):
+        raise RuntimeError("SUI_HOST must be an absolute HTTP(S) URL")
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("SUI_HOST contains an invalid host or port") from exc
+    if parsed.scheme not in {"http", "https"} or not hostname:
         raise RuntimeError("SUI_HOST must be an absolute HTTP(S) URL")
     if parsed.username or parsed.password:
         raise RuntimeError("SUI_HOST must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("SUI_HOST must not contain a query string or fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise RuntimeError("SUI_HOST contains an invalid port")
     if parsed.scheme == "http" and not allow_insecure_http:
         try:
-            is_loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+            is_loopback = ipaddress.ip_address(hostname).is_loopback
         except ValueError:
-            is_loopback = parsed.hostname.lower() == "localhost"
+            is_loopback = hostname.lower() == "localhost"
         if not is_loopback:
             raise RuntimeError(
                 "SUI_HOST must use HTTPS for remote hosts; set ALLOW_INSECURE_HTTP=true only for a trusted private deployment"

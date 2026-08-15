@@ -1,4 +1,4 @@
-from sui_bot.outgoing_localization import localize_outgoing_text
+from sui_bot.outgoing_localization import localize_outgoing_text, preserve_dynamic_text
 
 
 def test_admin_message_is_localized_without_changing_identifiers():
@@ -19,3 +19,18 @@ def test_user_error_and_legacy_persian_receipt_are_localized():
 def test_english_output_is_unchanged():
     source = "⚙️ Admin Settings\n🏠 Main Menu"
     assert localize_outgoing_text("en", source) == source
+
+
+def test_short_phrases_do_not_corrupt_larger_words_or_filenames():
+    localized = localize_outgoing_text("fa", "Backup file: sui-backup.json\nNo notification")
+    assert "بازگشتup" not in localized
+    assert "خیرtification" not in localized
+    assert "sui-backup.json" in localized
+
+
+def test_server_values_are_preserved_even_when_they_match_fixed_ui_words():
+    server_name = preserve_dynamic_text("Back")
+    source = f"Username: {server_name}\nBack"
+
+    assert localize_outgoing_text("fa", source) == "نام کاربری: Back\nبازگشت"
+    assert localize_outgoing_text("en", server_name) == "Back"

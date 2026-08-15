@@ -24,6 +24,20 @@ def test_embedded_credentials_are_rejected() -> None:
         validate_service_url("https://user:pass@panel.example.com")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://panel.example.com?token=secret",
+        "https://panel.example.com/#fragment",
+        " https://panel.example.com",
+        "https://panel.example.com:99999",
+    ],
+)
+def test_service_url_rejects_ambiguous_or_invalid_values(url: str) -> None:
+    with pytest.raises(RuntimeError):
+        validate_service_url(url)
+
+
 def test_callback_authorization_is_deny_by_default() -> None:
     assert is_public_callback("language_settings")
     assert is_public_callback("select_sub_42")

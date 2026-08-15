@@ -7,6 +7,7 @@ import shutil
 import threading
 import base64
 import secrets
+import signal
 import string
 import uuid
 import html
@@ -22,8 +23,9 @@ import aiohttp
 import psutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, ExtBot, MessageHandler, filters
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.helpers import escape_markdown
+from telegram.request import HTTPXRequest
 
 from .backup import BackupTooLargeError, stream_response_to_file
 from .backup_bundle import MAX_BUNDLE_BYTES, build_bundle, load_bundle, restore_bundle, write_bundle
@@ -37,7 +39,7 @@ from .runtime_settings import load_runtime_settings, save_runtime_setting
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
 from .navigation import has_multiple_subscriptions
-from .outgoing_localization import localize_inline_markup, localize_outgoing_text
+from .outgoing_localization import localize_inline_markup, localize_outgoing_text, preserve_dynamic_text
 from .sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata
 
 try:
@@ -69,9 +71,13 @@ DATA_DIR = os.getenv("DATA_DIR", "").strip()
 
 def managed_data_path(value: str) -> str:
     path = Path(value)
-    if path.is_absolute() or not DATA_DIR:
+    if not DATA_DIR:
         return str(path)
-    return str(Path(DATA_DIR) / path)
+    state_root = Path(DATA_DIR).resolve()
+    resolved = path.resolve() if path.is_absolute() else (state_root / path).resolve()
+    if resolved != state_root and state_root not in resolved.parents:
+        raise RuntimeError(f"Managed data path must stay inside DATA_DIR: {value}")
+    return str(resolved)
 
 
 SETTINGS = Settings.from_env()
@@ -89,6 +95,7 @@ RATE_LIMIT_WINDOW = SETTINGS.rate_limit_window
 MAX_REQUESTS_PER_WINDOW = SETTINGS.max_requests_per_window
 RATE_LIMIT_SECONDS = SETTINGS.rate_limit_seconds
 BLOCK_DURATION = SETTINGS.block_duration
+REDIS_ENABLED = SETTINGS.redis_enabled
 REDIS_HOST = SETTINGS.redis_host
 REDIS_PORT = SETTINGS.redis_port
 REDIS_DB = SETTINGS.redis_db
@@ -124,6 +131,7 @@ MAX_BROADCAST_LEN = 2000
 MAX_CALLBACK_DATA_LEN = 64
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
 API_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_read=15)
+API_GET_ATTEMPTS = 4
 
 # Alert State tracking
 alert_state = {
@@ -404,6 +412,10 @@ def user_language(user_id: int) -> str:
 def tr(user_id: int, key: str, **values: Any) -> str:
     return translate(user_language(user_id), key, **values)
 
+async def localized_query_answer(query, text=None, *args, **kwargs):
+    localized = localize_outgoing_text(user_language(query.from_user.id), text)
+    return await query.answer(localized, *args, **kwargs)
+
 def localized_remaining_time(expiry_timestamp: int, user_id: int) -> str:
     if expiry_timestamp == 0:
         return tr(user_id, "unlimited")
@@ -457,6 +469,14 @@ class LocalizedExtBot(ExtBot):
         kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
         return await super().send_photo(chat_id, photo, *args, **kwargs)
 
+    async def edit_message_caption(self, *args, chat_id=None, caption=None, **kwargs):
+        language = self._language(chat_id)
+        localized_caption = localize_outgoing_text(language, caption)
+        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        return await super().edit_message_caption(
+            *args, chat_id=chat_id, caption=localized_caption, **kwargs
+        )
+
 def is_safe_callback_data(data: str) -> bool:
     if not data or len(data) > MAX_CALLBACK_DATA_LEN:
         return False
@@ -492,15 +512,40 @@ class APIClient:
             await self.session.close()
 
     async def get(self, endpoint: str, params = None):
-        await self.ensure_session()
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        try:
-            async with self.session.get(url, params=params) as response:
-                response.raise_for_status()
-                return await self.decode_json_response(response)
-        except Exception as e:
-            logger.error(f"API request failed for {endpoint}: {e}")
-            return None
+        for attempt in range(1, API_GET_ATTEMPTS + 1):
+            await self.ensure_session()
+            try:
+                async with self.session.get(
+                    url,
+                    params=params,
+                    headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+                ) as response:
+                    response.raise_for_status()
+                    return await self.decode_json_response(response)
+            except asyncio.CancelledError:
+                raise
+            except aiohttp.ClientResponseError as exc:
+                retryable = exc.status in {408, 425, 429} or exc.status >= 500
+                if not retryable or attempt == API_GET_ATTEMPTS:
+                    logger.warning(
+                        "S-UI GET %s failed with HTTP %s%s",
+                        endpoint, exc.status,
+                        f" after {attempt} attempts" if retryable else "",
+                    )
+                    return None
+                delay = 0.5 * (2 ** (attempt - 1))
+                await asyncio.sleep(delay)
+            except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                if attempt == API_GET_ATTEMPTS:
+                    logger.warning(
+                        "S-UI GET %s failed after %s attempts (%s): %s",
+                        endpoint, API_GET_ATTEMPTS, type(exc).__name__, exc,
+                    )
+                    return None
+                delay = 0.5 * (2 ** (attempt - 1))
+                await asyncio.sleep(delay)
+        return None
 
 api_client = APIClient(SUI_HOST, SUI_TOKEN)
 
@@ -877,7 +922,7 @@ def create_inbounds_keyboard(selected_inbounds=None, prefix="inbound"):
         port = inbound.get("listen_port", "")
 
         # Create display text with selection indicator
-        display_text = tag
+        display_text = preserve_dynamic_text(tag)
         if port:
             display_text += f" ({port})"
 
@@ -908,10 +953,10 @@ async def get_subscription_base_url(force_refresh=False) -> str:
 
 async def refresh_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
 
     if query.from_user.id != ADMIN_TELEGRAM_ID:
-        await query.answer("❌ Admin Only", show_alert=True)
+        await localized_query_answer(query, "❌ Admin Only", show_alert=True)
         return
 
     # Show loading message
@@ -953,7 +998,7 @@ def rate_limited(admin_only=False, track_metrics=True):
                 if update.message:
                     await update.message.reply_text("❌ Admin Only")
                 elif update.callback_query:
-                    await update.callback_query.answer("❌ Admin Only", show_alert=True)
+                    await localized_query_answer(update.callback_query, "❌ Admin Only", show_alert=True)
                 return
             if not await rate_limiter.check_rate_limit(user_id):
                 remaining_block = await rate_limiter.get_block_status(user_id)
@@ -965,7 +1010,7 @@ def rate_limited(admin_only=False, track_metrics=True):
                 if update.message:
                     await update.message.reply_text(reply_text)
                 elif update.callback_query:
-                    await update.callback_query.answer(reply_text, show_alert=True)
+                    await localized_query_answer(update.callback_query, reply_text, show_alert=True)
                 return
             try:
                 result = await func(update, context)
@@ -979,13 +1024,13 @@ def rate_limited(admin_only=False, track_metrics=True):
                 if update.message:
                     await update.message.reply_text("❌ Unexpected error occurred. Please try again.")
                 elif update.callback_query:
-                    await update.callback_query.answer("❌ Unexpected error occurred. Please try again.", show_alert=True)
+                    await localized_query_answer(update.callback_query, "❌ Unexpected error occurred. Please try again.", show_alert=True)
         return wrapper
     return decorator
 
 def format_client(client: dict, is_admin: bool = False, user_id: int | None = None) -> str:
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
-    name = client.get("name", "Unknown")
+    name = preserve_dynamic_text(client["name"]) if client.get("name") else "Unknown"
     volume = client.get("volume", 0)
     up = client.get("up", 0)
     down = client.get("down", 0)
@@ -1008,8 +1053,10 @@ def format_client(client: dict, is_admin: bool = False, user_id: int | None = No
     lines.append(f"{tr(uid, 'expiry')}: {localized_remaining_time(expiry, uid)}")
 
     if is_admin:
-        lines.append(f"{tr(uid, 'description')}: {client.get('desc', 'N/A')}")
-        lines.append(f"{tr(uid, 'group')}: {client.get('group', 'N/A')}")
+        description = preserve_dynamic_text(client["desc"]) if client.get("desc") else "N/A"
+        group = preserve_dynamic_text(client["group"]) if client.get("group") else "N/A"
+        lines.append(f"{tr(uid, 'description')}: {description}")
+        lines.append(f"{tr(uid, 'group')}: {group}")
 
     return "\n".join(lines)
 
@@ -1253,9 +1300,9 @@ def normalize_card_number(raw: str) -> Optional[str]:
 
 async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     if query.from_user.id != ADMIN_TELEGRAM_ID:
-        await query.answer("❌ Only admin", show_alert=True)
+        await localized_query_answer(query, "❌ Only admin", show_alert=True)
         return ConversationHandler.END
 
     if query.data == "settings_set_card_number":
@@ -1405,10 +1452,10 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for client_id in client_ids:
             client = client_map.get(client_id)
             if client:
-                name = client.get("name", "Unknown")
-                desc = client.get("desc", "No description")
+                name = preserve_dynamic_text(client["name"]) if client.get("name") else "Unknown"
+                desc = preserve_dynamic_text(client["desc"]) if client.get("desc") else "No description"
                 expiry = client.get("expiry", 0)
-                expiry_str = calculate_remaining_time(expiry)
+                expiry_str = localized_remaining_time(expiry, tg_id)
                 button_text = f"📱 {desc} ({name}) - {expiry_str}"
             else:
                 button_text = f"📱 Subscription #{client_id}"
@@ -1582,7 +1629,7 @@ async def create_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def create_user_inbound_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     data = query.data
     if data == 'inbound_cancel':
         await query.edit_message_text("❌ Operation Aborted.")
@@ -1594,7 +1641,7 @@ async def create_user_inbound_callback(update: Update, context: ContextTypes.DEF
         selected_text = "✅ All Inbounds Selected."
     elif data == 'inbound_done':
         if not context.user_data.get('selected_inbounds'):
-            await query.answer("❌ Must At Least Select 1 Inbound.", show_alert=True)
+            await localized_query_answer(query, "❌ Must At Least Select 1 Inbound.", show_alert=True)
             return CREATE_USER_INBOUNDS
         keyboard = [
             [InlineKeyboardButton("♾️ Unlimited", callback_data='volume_unlimited')],
@@ -1632,7 +1679,7 @@ async def create_user_inbound_callback(update: Update, context: ContextTypes.DEF
 async def create_user_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await localized_query_answer(query)
         if query.data == 'create_cancel':
             await query.edit_message_text("❌ Operation Aborted.")
             context.user_data.clear()
@@ -1681,7 +1728,7 @@ async def create_user_volume(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def create_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await localized_query_answer(query)
         if query.data == 'create_cancel':
             await query.edit_message_text("❌ Operation Aborted.")
             context.user_data.clear()
@@ -1784,6 +1831,7 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         error_msg = result.get('msg', 'Unknown Error') if result else 'Server Unresponsive'
+        error_msg = preserve_dynamic_text(error_msg)
         await update.message.reply_text(
             f"❌ Failed To Create User:\n{error_msg}\n\n"
             "Try Again: /createuser"
@@ -1895,7 +1943,7 @@ async def edit_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_user_inbound_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     data = query.data
 
     if data == 'edit_inbound_cancel':
@@ -1908,7 +1956,7 @@ async def edit_user_inbound_callback(update: Update, context: ContextTypes.DEFAU
         selected_text = "✅ All Inbounds Selected."
     elif data == 'edit_inbound_done':
         if not context.user_data.get('edited_selected_inbounds'):
-            await query.answer("❌ Choose At Least 1 Inbound.", show_alert=True)
+            await localized_query_answer(query, "❌ Choose At Least 1 Inbound.", show_alert=True)
             return EDIT_USER_INBOUNDS
 
         current_volume_bytes = context.user_data['edited_client_volume']
@@ -1953,7 +2001,7 @@ async def edit_user_inbound_callback(update: Update, context: ContextTypes.DEFAU
 async def edit_user_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await localized_query_answer(query)
         if query.data == 'edit_cancel':
             await query.edit_message_text("❌ Operation Aborted.")
             context.user_data.clear()
@@ -2015,7 +2063,7 @@ async def edit_user_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await localized_query_answer(query)
         if query.data == 'edit_cancel':
             await query.edit_message_text("❌ Operation Aborted.")
             context.user_data.clear()
@@ -2110,7 +2158,7 @@ async def edit_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_user_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     if query.data == 'edit_cancel':
         await query.edit_message_text("❌ Operation Aborted.")
         context.user_data.clear()
@@ -2133,7 +2181,7 @@ async def edit_user_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     if query.data == 'edit_cancel':
         await query.edit_message_text("❌ Operation Aborted.")
         context.user_data.clear()
@@ -2205,6 +2253,7 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         error_msg = result.get('msg', 'Unknown Error') if result else 'Server Unresponsive'
+        error_msg = preserve_dynamic_text(error_msg)
         await query.edit_message_text(
             f"❌ Error Editing User:\n{error_msg}\n\n"
             "Try Again: /edituser"
@@ -2263,7 +2312,7 @@ async def delete_user_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def delete_user_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     data = query.data
 
     if data == 'delete_confirm_yes':
@@ -2315,14 +2364,14 @@ async def delete_user_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @rate_limited(admin_only=False)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
     user_id = query.from_user.id
     data = query.data
     if not is_safe_callback_data(data):
-        await query.answer("❌ Invalid action.", show_alert=True)
+        await localized_query_answer(query, "❌ Invalid action.", show_alert=True)
         return
     if user_id != ADMIN_TELEGRAM_ID and not is_public_callback(data):
-        await query.answer("❌ Admin only", show_alert=True)
+        await localized_query_answer(query, "❌ Admin only", show_alert=True)
         return
     metrics.record_command(user_id, f"button_{data}")
     try:
@@ -2331,7 +2380,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith('lang_set_'):
             language = data.removeprefix('lang_set_')
             if language not in SUPPORTED_LANGUAGES:
-                await query.answer("Invalid language", show_alert=True)
+                await localized_query_answer(query, "Invalid language", show_alert=True)
                 return
             await asyncio.to_thread(language_store.set, user_id, language)
             is_admin = user_id == ADMIN_TELEGRAM_ID
@@ -2345,7 +2394,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(tr(user_id, "welcome"), reply_markup=keyboard)
         elif data == 'admin_settings':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             await query.edit_message_text(
                 build_settings_menu_text(),
@@ -2383,7 +2432,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == 'settings_plans':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             enabled = ", ".join(f"{m}M" for m in get_renewal_month_options())
             await query.edit_message_text(
@@ -2394,23 +2443,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == 'settings_plans_reset':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             set_renewal_month_options([1, 2, 3])
             await query.edit_message_text(
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
             )
-            await query.answer("✅ Renewal plans reset to 1,2,3 months.", show_alert=True)
+            await localized_query_answer(query, "✅ Renewal plans reset to 1,2,3 months.", show_alert=True)
         elif data.startswith('settings_plan_toggle_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             month = int(data.split('_')[-1])
             current = set(get_renewal_month_options())
             if month in current:
                 if len(current) == 1:
-                    await query.answer("❌ At least one plan must stay enabled.", show_alert=True)
+                    await localized_query_answer(query, "❌ At least one plan must stay enabled.", show_alert=True)
                     return
                 current.remove(month)
                 action_text = f"❌ Disabled {month} month plan."
@@ -2425,15 +2474,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Current: {enabled}",
                 reply_markup=build_settings_plans_keyboard()
             )
-            await query.answer(action_text, show_alert=False)
+            await localized_query_answer(query, action_text, show_alert=False)
         elif data.startswith('settings_price_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             global RENEWAL_MONTHLY_PRICE
             parts = data.split('_')
             if len(parts) != 4:
-                await query.answer("❌ Invalid price action.", show_alert=True)
+                await localized_query_answer(query, "❌ Invalid price action.", show_alert=True)
                 return
             op = parts[2]
             delta = int(parts[3])
@@ -2442,7 +2491,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif op == 'minus':
                 new_price = max(1000, RENEWAL_MONTHLY_PRICE - delta)
             else:
-                await query.answer("❌ Invalid price action.", show_alert=True)
+                await localized_query_answer(query, "❌ Invalid price action.", show_alert=True)
                 return
             RENEWAL_MONTHLY_PRICE = new_price
             save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(RENEWAL_MONTHLY_PRICE), RUNTIME_SETTINGS_FILE)
@@ -2450,10 +2499,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
             )
-            await query.answer(f"✅ New monthly price: {RENEWAL_MONTHLY_PRICE:,}", show_alert=False)
+            await localized_query_answer(query, f"✅ New monthly price: {RENEWAL_MONTHLY_PRICE:,}", show_alert=False)
         elif data == 'create_user_prompt':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             await query.edit_message_text(
                 "➕ To Create a New User Follow The Procedure\n\n"
@@ -2463,7 +2512,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == 'edit_user_prompt':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             await query.edit_message_text(
                 "📝 To Edit an Existing User Follow The Procedure\n\n"
@@ -2473,7 +2522,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == 'delete_user_prompt':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             await query.edit_message_text(
                 "🗑️ To Delete an Existing User Follow The Procedure\n\n"
@@ -2487,7 +2536,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Specific subscription selected
                 client_id = int(parts[2])
                 if not user_has_client_access(user_id, client_id):
-                    await query.answer("❌ You don't have access to this subscription.", show_alert=True)
+                    await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                     return
                 is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
                 new_usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
@@ -2505,7 +2554,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    await query.edit_message_text(new_usage_msg, reply_markup=new_reply_markup)
                 except BadRequest as e:
                     if "message is not modified" in str(e).lower():
-                        await query.answer("✅ Data Is Up To Date.", show_alert=False)
+                        await localized_query_answer(query, "✅ Data Is Up To Date.", show_alert=False)
                     else:
                         raise
             else:
@@ -2539,10 +2588,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         for client_id in client_ids:
                             client = client_map.get(client_id)
                             if client:
-                               name = client.get("name", "Unknown")
-                               desc = client.get("desc", "No description")
+                               name = preserve_dynamic_text(client["name"]) if client.get("name") else "Unknown"
+                               desc = preserve_dynamic_text(client["desc"]) if client.get("desc") else "No description"
                                expiry = client.get("expiry", 0)
-                               expiry_str = calculate_remaining_time(expiry)
+                               expiry_str = localized_remaining_time(expiry, user_id)
                                button_text = f"📱 {desc} ({name}) - {expiry_str}"
                             else:
                                button_text = f"📱 Subscription #{client_id}"
@@ -2571,7 +2620,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ No subscription selected.")
                 return
             if not user_has_client_access(user_id, client_id):
-                await query.answer("❌ You don't have access to this subscription.", show_alert=True)
+                await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                 return
 
             data_obj = await api_client.get('apiv2/clients', {'id': client_id})
@@ -2599,7 +2648,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith('select_sub_'):
             client_id = int(data.split('_')[-1])
             if not user_has_client_access(user_id, client_id):
-                await query.answer("❌ You don't have access to this subscription.", show_alert=True)
+                await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                 return
             is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
             usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
@@ -2618,7 +2667,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith('renew_start_'):
             client_id = int(data.split('_')[-1])
             if not user_has_client_access(user_id, client_id):
-                await query.answer("❌ You don't have access to this subscription.", show_alert=True)
+                await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                 return
 
             cleanup_pending_renew_requests()
@@ -2627,25 +2676,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # In the renew_start_ callback
             for months in month_options:
                 amount = renewal_amount(months)
-                keyboard.append([InlineKeyboardButton(f"{months} Month(ماه) - {amount:,} تومان", callback_data=f'renew_choose_{client_id}_{months}')])
-            keyboard.append([InlineKeyboardButton("🔙 Back(بازگشت)", callback_data=f'select_sub_{client_id}')])
+                keyboard.append([InlineKeyboardButton(
+                    tr(user_id, "renew_plan_button", months=months, amount=amount),
+                    callback_data=f'renew_choose_{client_id}_{months}',
+                )])
+            keyboard.append([InlineKeyboardButton(tr(user_id, "back"), callback_data=f'select_sub_{client_id}')])
             await query.edit_message_text(
-                "💳 Renewal Request\n\nChoose renewal duration:",
+                f"{tr(user_id, 'renew_title')}\n\n{tr(user_id, 'renew_choose_duration')}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         elif data.startswith('renew_choose_'):
             parts = data.split('_')
             if len(parts) != 4:
-                await query.answer("❌ Invalid option.", show_alert=True)
+                await localized_query_answer(query, "❌ Invalid option.", show_alert=True)
                 return
             client_id = int(parts[2])
             months = int(parts[3])
             allowed_months = set(get_renewal_month_options())
             if months not in allowed_months:
-                await query.answer("❌ Invalid duration.", show_alert=True)
+                await localized_query_answer(query, "❌ Invalid duration.", show_alert=True)
                 return
             if not user_has_client_access(user_id, client_id):
-                await query.answer("❌ You don't have access to this subscription.", show_alert=True)
+                await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                 return
 
             amount = renewal_amount(months)
@@ -2656,36 +2708,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "created_at": datetime.now().timestamp()
             }
 
-            holder_line = f"\n👤 Card Holder: {PAYMENT_CARD_HOLDER}" if PAYMENT_CARD_HOLDER else ""
+            holder_line = f"\n{tr(user_id, 'card_holder_value', holder=PAYMENT_CARD_HOLDER)}" if PAYMENT_CARD_HOLDER else ""
             keyboard = [
-                [InlineKeyboardButton("❌ Cancel(لغو)", callback_data=f'renew_cancel_{client_id}')],
-                [InlineKeyboardButton("🔙 Back(بازگشت)", callback_data=f'renew_start_{client_id}')]
+                [InlineKeyboardButton(tr(user_id, "cancel"), callback_data=f'renew_cancel_{client_id}')],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data=f'renew_start_{client_id}')]
             ]
             await query.edit_message_text(
-                f"💳 Renewal Payment\n\n"
-                f"📦 Duration: {months} Month(s)\n"
-                f"💰 Amount: {amount:,} Tooman\n"
-                f"🏦 Card Number: {PAYMENT_CARD_NUMBER}{holder_line}\n\n"
-                f"لطفا مبلغ مشخص شده رو به شماره کارت بالا واریز کنید و تصویر رسید رو اینجا ارسال کنید.\n"
-                f"بعد از ارسال رسید منتظر تایید ادمین باشید.",
+                f"{tr(user_id, 'renew_payment')}\n\n"
+                f"{tr(user_id, 'duration_value', months=months)}\n"
+                f"{tr(user_id, 'amount_value', amount=amount)}\n"
+                f"{tr(user_id, 'card_number_value', card_number=PAYMENT_CARD_NUMBER)}{holder_line}\n\n"
+                f"{tr(user_id, 'payment_instructions')}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         elif data.startswith('renew_cancel_'):
             context.user_data.pop('pending_renew_submission', None)
             client_id = int(data.split('_')[-1])
             await query.edit_message_text(
-                "❌ Renewal request cancelled.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back(بازگشت)", callback_data=f'select_sub_{client_id}')]])
+                tr(user_id, "renew_cancelled"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(user_id, "back"), callback_data=f'select_sub_{client_id}')]])
             )
         elif data.startswith('renew_appr_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             cleanup_pending_renew_requests()
             request_id = data.split('_')[-1]
-            req = pending_renew_requests.get(request_id)
+            # Claim the request before awaiting network I/O so repeated button
+            # presses cannot apply the same renewal concurrently.
+            req = pending_renew_requests.pop(request_id, None)
             if not req:
-                await query.answer("❌ Request not found or already handled.", show_alert=True)
+                await localized_query_answer(query, "❌ Request not found or already handled.", show_alert=True)
                 return
 
             client_id = req["client_id"]
@@ -2695,16 +2748,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data_obj = await api_client.get('apiv2/clients', {'id': client_id})
             clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
             if not clients:
-                await query.answer("❌ Client not found on server.", show_alert=True)
+                pending_renew_requests[request_id] = req
+                await localized_query_answer(query, "❌ Client not found on server.", show_alert=True)
                 return
 
             client = clients[0]
-            client_desc = client.get("desc", "No description")
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            current_expiry = int(client.get("expiry", 0) or 0)
-            base_ts = max(now_ts, current_expiry) if current_expiry > 0 else now_ts
-            extended_seconds = months * 30 * 24 * 60 * 60
-            new_expiry = base_ts + extended_seconds
+            raw_client_desc = client.get("desc")
+            client_desc = preserve_dynamic_text(raw_client_desc) if raw_client_desc else "No description"
+            new_expiry = req.get("target_expiry")
+            if not isinstance(new_expiry, int) or new_expiry <= 0:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                try:
+                    current_expiry = int(client.get("expiry", 0) or 0)
+                except (TypeError, ValueError):
+                    pending_renew_requests[request_id] = req
+                    await localized_query_answer(query, tr(user_id, "invalid_server_expiry"), show_alert=True)
+                    return
+                base_ts = max(now_ts, current_expiry) if current_expiry > 0 else now_ts
+                extended_seconds = months * 30 * 24 * 60 * 60
+                new_expiry = base_ts + extended_seconds
+                req["target_expiry"] = new_expiry
 
             # Build edit payload from current server object and only change expiry.
             edited_data_for_api = json.loads(json.dumps(client))
@@ -2718,7 +2781,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 global clients_cache, clients_cache_time
                 clients_cache = None
                 clients_cache_time = 0
-                pending_renew_requests.pop(request_id, None)
                 new_days = calculate_remaining_time(new_expiry)
                 try:
                     await context.bot.send_message(
@@ -2758,17 +2820,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"New Expiry: {new_days}"
                     )
             else:
+                pending_renew_requests[request_id] = req
                 error_msg = result.get("msg", "Unknown Error") if result else "Server Unresponsive"
-                await query.answer(f"❌ Failed: {error_msg}", show_alert=True)
+                await localized_query_answer(
+                    query, f"❌ Failed: {preserve_dynamic_text(error_msg)}", show_alert=True
+                )
         elif data.startswith('renew_rej_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             cleanup_pending_renew_requests()
             request_id = data.split('_')[-1]
             req = pending_renew_requests.pop(request_id, None)
             if not req:
-                await query.answer("❌ Request not found or already handled.", show_alert=True)
+                await localized_query_answer(query, "❌ Request not found or already handled.", show_alert=True)
                 return
             user_tg_id = req["user_tg_id"]
             client_id = req["client_id"]
@@ -2802,7 +2867,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         elif data.startswith('all_clients_page_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             page = int(data.split('_')[-1])
             clients = await get_all_clients_list()
@@ -2821,7 +2886,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=keyboard)
         elif data == 'online_users':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             data_obj = await api_client.get('apiv2/onlines')
             if not data_obj:
@@ -2844,13 +2909,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             except BadRequest as e:
                 if "message is not modified" in str(e).lower():
-                    await query.answer("✅ List Is Up To Date.", show_alert=False)
+                    await localized_query_answer(query, "✅ List Is Up To Date.", show_alert=False)
                 else:
                     raise
 
         elif data == 'server_status':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             data_obj = await api_client.get('apiv2/status', {'r': 'cpu,mem,net,sys,sbd,dsk,swp,dio,db'})
             if not data_obj:
@@ -3003,7 +3068,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
         elif data == 'bot_stats':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             stats = metrics.get_global_stats()
             start_time = datetime.fromisoformat(stats['start_time'])
@@ -3027,7 +3092,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
         elif data.startswith('user_details_page_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             page = int(data.split('_')[-1])
             user_ids = list(telegram_clients.keys())
@@ -3069,13 +3134,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith('links_page_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             page = int(data.split('_')[-1])
             await show_links_page(query, page=page)
         elif data == 'add_link_help':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             assigned_client_ids = set()
@@ -3122,7 +3187,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await refresh_sub_callback(update, context)
         elif data.startswith('user_stats_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             target_id = int(data.split('_')[-1])
             user_stats = metrics.get_user_stats(target_id)
@@ -3146,15 +3211,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
         elif data.startswith('unblock_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             target_id = int(data.split('_')[-1])
             await rate_limiter.reset_user(target_id)
-            await query.answer(f"✅ User {target_id} Unblocked.", show_alert=True)
+            await localized_query_answer(query, f"✅ User {target_id} Unblocked.", show_alert=True)
 
         elif data == 'broadcast_message':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             keyboard = [
@@ -3172,7 +3237,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == 'broadcast_all':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             context.user_data['broadcast_type'] = 'all'
@@ -3194,7 +3259,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == 'broadcast_specific':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             await show_broadcast_users_page(query, context, page=1)
@@ -3202,7 +3267,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith('broadcast_page_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             page = int(data.split('_')[-1])
@@ -3210,12 +3275,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith('broadcast_user_'):
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             parts = data.split('_')
             if len(parts) < 4:
-                await query.answer("❌ Invalid selection data.", show_alert=True)
+                await localized_query_answer(query, "❌ Invalid selection data.", show_alert=True)
                 return
             selected_tg_id = int(parts[2])
             selected_client_id = int(parts[3])
@@ -3224,13 +3289,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if selected_key in selected_user_keys:
                 selected_user_keys.remove(selected_key)
-                await query.answer(
+                await localized_query_answer(query,
                     f"❌ User {selected_tg_id} / Client {selected_client_id} Removed.",
                     show_alert=True
                 )
             else:
                 selected_user_keys.append(selected_key)
-                await query.answer(
+                await localized_query_answer(query,
                     f"✅ User {selected_tg_id} / Client {selected_client_id} Added.",
                     show_alert=True
                 )
@@ -3249,13 +3314,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == 'broadcast_confirm_selection':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             selected_user_keys = context.user_data.get('selected_user_keys', [])
 
             if not selected_user_keys:
-                await query.answer("❌ Choose At Least 1 User.", show_alert=True)
+                await localized_query_answer(query, "❌ Choose At Least 1 User.", show_alert=True)
                 return
 
             broadcast_users = []
@@ -3271,7 +3336,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     broadcast_users.append(tg_id)
 
             if not broadcast_users:
-                await query.answer("❌ Choose At Least 1 User.", show_alert=True)
+                await localized_query_answer(query, "❌ Choose At Least 1 User.", show_alert=True)
                 return
 
             context.user_data['broadcast_users'] = broadcast_users
@@ -3293,7 +3358,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == 'check_inactive_users':
             if user_id != ADMIN_TELEGRAM_ID:
-                await query.answer("❌ Only admin", show_alert=True)
+                await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
 
             data_obj = await api_client.get('apiv2/clients')
@@ -3442,10 +3507,10 @@ async def broadcast_message_handler(update: Update, context: ContextTypes.DEFAUL
 async def broadcast_execute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
 
     if query.from_user.id != ADMIN_TELEGRAM_ID:
-        await query.answer("❌ Only admin", show_alert=True)
+        await localized_query_answer(query, "❌ Only admin", show_alert=True)
         return
 
     message_text = context.user_data.get('broadcast_message')
@@ -3469,7 +3534,7 @@ async def broadcast_execute_callback(update: Update, context: ContextTypes.DEFAU
         try:
             await context.bot.send_message(
                 chat_id=tg_id,
-                text=f"📢 اطلاعیه از ادمین\n\n{message_text}\n\nاین پیام به صورت خودکار ارسال شده است"
+                text=tr(tg_id, "broadcast_delivery", message=message_text)
             )
             successful += 1
 
@@ -3518,7 +3583,7 @@ async def broadcast_execute_callback(update: Update, context: ContextTypes.DEFAU
 async def broadcast_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
 
     await query.edit_message_text("❌ Sending Broadcast Aborted.")
 
@@ -3584,8 +3649,10 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
         clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
         if clients:
-            client_desc = clients[0].get("desc", "Unknown")
-            client_name = clients[0].get("name", "Unknown")
+            raw_desc = clients[0].get("desc")
+            raw_name = clients[0].get("name")
+            client_desc = preserve_dynamic_text(raw_desc) if raw_desc else "Unknown"
+            client_name = preserve_dynamic_text(raw_name) if raw_name else "Unknown"
     except Exception as e:
         logger.error(f"Failed to fetch client details for renewal request: {e}")
 
@@ -3625,7 +3692,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Failed to submit request to admin. Please try again.")
         return
 
-    await update.message.reply_text("✅ رسید شما برای ادمین ارسال شد.\nمنتظر تایید باشید.")
+    await update.message.reply_text(tr(user_id, "receipt_sent"))
 
 @rate_limited(admin_only=True)
 async def check_inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4104,11 +4171,24 @@ async def send_cleanup_notification(app, unlinked_details, total_count):
         logger.error(f"Failed to send cleanup notification: {e}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Bot error: {context.error}", exc_info=context.error)
+    if isinstance(context.error, NetworkError):
+        logger.warning("Telegram operation was interrupted (%s)", context.error)
+    else:
+        logger.error("Unhandled bot error: %s", context.error, exc_info=context.error)
     if update and update.effective_user:
         metrics.record_error(update.effective_user.id)
-    if update.effective_message:
-        await update.effective_message.reply_text("❌ Unexpected Error , Please Contact Admin")
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text("❌ Unexpected Error , Please Contact Admin")
+        except TelegramError as exc:
+            logger.warning("Could not deliver the error notice to Telegram: %s", exc)
+
+def polling_error_callback(error: TelegramError) -> None:
+    """Keep transient Telegram long-poll failures concise; Updater retries them."""
+    if isinstance(error, NetworkError):
+        logger.warning("Telegram polling connection was interrupted (%s); retrying automatically", error)
+    else:
+        logger.error("Telegram polling error: %s", error)
 
 async def show_links_page(query, page: int = 1):
 
@@ -4303,17 +4383,17 @@ async def show_broadcast_users_page(query, context, page: int = 1):
 async def broadcast_selection_summary_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show summary of selected users for broadcast"""
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
 
     user_id = query.from_user.id
     if user_id != ADMIN_TELEGRAM_ID:
-        await query.answer("❌ Only admin", show_alert=True)
+        await localized_query_answer(query, "❌ Only admin", show_alert=True)
         return
 
     selected_user_keys = context.user_data.get('selected_user_keys', [])
 
     if not selected_user_keys:
-        await query.answer("❌ No User Is Selected.", show_alert=True)
+        await localized_query_answer(query, "❌ No User Is Selected.", show_alert=True)
         return
 
     # Get clients info for selected users
@@ -4356,16 +4436,16 @@ async def broadcast_selection_summary_callback(update: Update, context: ContextT
 async def broadcast_clear_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all selected users"""
     query = update.callback_query
-    await query.answer()
+    await localized_query_answer(query)
 
     user_id = query.from_user.id
     if user_id != ADMIN_TELEGRAM_ID:
-        await query.answer("❌ Only admin", show_alert=True)
+        await localized_query_answer(query, "❌ Only admin", show_alert=True)
         return
 
     context.user_data['selected_user_keys'] = []
     context.user_data['selected_users'] = []
-    await query.answer("✅ All Selection Cleared.", show_alert=True)
+    await localized_query_answer(query, "✅ All Selection Cleared.", show_alert=True)
 
     # Refresh current page
     current_page = context.user_data.get('broadcast_page', 1)
@@ -4375,7 +4455,7 @@ async def broadcast_clear_selection_callback(update: Update, context: ContextTyp
 
 async def monitor_system_resources(app):
     """Monitor local system resources and send alerts to admin"""
-    logger.info("🔍 Starting system resource monitoring...")
+    logger.info("System resource monitoring started")
 
     while True:
         try:
@@ -4486,20 +4566,32 @@ async def main():
     metrics.metrics['start_time'] = datetime.now().isoformat()
     metrics.save_metrics()
 
-    if REDIS_AVAILABLE:
+    if REDIS_ENABLED and REDIS_AVAILABLE:
         try:
             redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
             await redis_client.ping()
-            print(f"✅ Redis connected: {REDIS_HOST}:{REDIS_PORT}")
+            logger.info("Redis rate limiting enabled at %s:%s", REDIS_HOST, REDIS_PORT)
             rate_limiter = RateLimiter(redis_client)
         except Exception as e:
-            print(f"⚠️  Redis connection failed: {e}")
-            print("   Using in-memory rate limiting")
+            if redis_client is not None:
+                await redis_client.aclose()
+                redis_client = None
+            logger.warning("Redis unavailable (%s); using in-memory rate limiting", e)
             rate_limiter = RateLimiter(None)
     else:
+        if REDIS_ENABLED and not REDIS_AVAILABLE:
+            logger.warning("REDIS_ENABLED is true but the Redis package is unavailable; using in-memory rate limiting")
         rate_limiter = RateLimiter(None)
 
-    app = ApplicationBuilder().bot(LocalizedExtBot(token=BOT_TOKEN)).build()
+    polling_request = HTTPXRequest(
+        connection_pool_size=1,
+        read_timeout=40,
+        connect_timeout=10,
+        pool_timeout=10,
+    )
+    app = ApplicationBuilder().bot(
+        LocalizedExtBot(token=BOT_TOKEN, get_updates_request=polling_request)
+    ).build()
 
     create_user_conv = ConversationHandler(
         entry_points=[CommandHandler('createuser', create_user_start)],
@@ -4590,54 +4682,83 @@ async def main():
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("checkinactive", check_inactive_command))
 
-    print("🤖 Bot is starting...")
-    print(f"   Admin ID: {ADMIN_TELEGRAM_ID}")
-    print(f"   Loaded {len(telegram_clients)} assignments")
-    print(f"   Redis: {'✅ Enabled' if rate_limiter.use_redis else '❌ Disabled (in-memory)'}")
-    print("   Metrics: ✅ Enabled")
-    print("   User Creation: ✅ Enabled")
-    print("   User Editing: ✅ Enabled")
-    print("   User Deletion: ✅ Enabled")
-    print(f"   Pagination: ✅ Enabled ({ITEMS_PER_PAGE} items/page)")
-    print("   Inline Keyboards: ✅ Enabled")
-    print("   Dynamic Inbounds: ✅ Enabled")
-    print(f"   System Monitoring: ✅ Enabled (CPU: {CPU_ALERT_THRESHOLD}%, RAM: {RAM_ALERT_THRESHOLD}%)")
+    logger.info(
+        "Starting SUI Bot with %s Telegram assignment(s); rate limiter=%s",
+        len(telegram_clients), "redis" if rate_limiter.use_redis else "memory",
+    )
 
-    async with app:
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        background_tasks = [
-            asyncio.create_task(daily_subscription_reminder(app), name="daily_subscription_reminder"),
-            asyncio.create_task(monitor_expired_subscriptions(app), name="monitor_expired_subscriptions"),
-            asyncio.create_task(daily_backup(app), name="daily_backup"),
-            asyncio.create_task(monitor_system_resources(app), name="monitor_system_resources"),
-            asyncio.create_task(cleanup_deleted_clients(app), name="cleanup_deleted_clients"),
-        ]
-        print("✅ Bot is running!")
-        try:
-            await asyncio.Event().wait()
-        except (KeyboardInterrupt, SystemExit):
-            print("\n🛑 Shutting down...")
-        finally:
-            for task in background_tasks:
-                task.cancel()
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-            await app.updater.stop()
-            await app.stop()
+    background_tasks: list[asyncio.Task] = []
+    application_started = False
+    polling_started = False
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    registered_signals = []
+    try:
+        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
             try:
-                await api_client.close()
-                if redis_client:
-                    await redis_client.aclose()
-                metrics.save_metrics()
-            except Exception as e:
-                logger.error(f"Cleanup error: {e}")
-            print("✅ Bot stopped gracefully.")
+                loop.add_signal_handler(shutdown_signal, stop_event.set)
+                registered_signals.append(shutdown_signal)
+            except (NotImplementedError, RuntimeError):
+                # add_signal_handler is unavailable on Windows and in some embedded loops.
+                break
+
+        async with app:
+            try:
+                await app.start()
+                application_started = True
+                await app.updater.start_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    timeout=30,
+                    error_callback=polling_error_callback,
+                )
+                polling_started = True
+                background_tasks = [
+                    asyncio.create_task(daily_subscription_reminder(app), name="daily_subscription_reminder"),
+                    asyncio.create_task(monitor_expired_subscriptions(app), name="monitor_expired_subscriptions"),
+                    asyncio.create_task(daily_backup(app), name="daily_backup"),
+                    asyncio.create_task(monitor_system_resources(app), name="monitor_system_resources"),
+                    asyncio.create_task(cleanup_deleted_clients(app), name="cleanup_deleted_clients"),
+                ]
+                logger.info("SUI Bot is running")
+                await stop_event.wait()
+            finally:
+                for task in background_tasks:
+                    task.cancel()
+                if background_tasks:
+                    await asyncio.gather(*background_tasks, return_exceptions=True)
+                if polling_started:
+                    try:
+                        await app.updater.stop()
+                    except Exception as exc:
+                        logger.warning("Telegram polling cleanup failed: %s", exc)
+                if application_started:
+                    try:
+                        await app.stop()
+                    except Exception as exc:
+                        logger.warning("Telegram application cleanup failed: %s", exc)
+    finally:
+        for shutdown_signal in registered_signals:
+            loop.remove_signal_handler(shutdown_signal)
+        try:
+            await api_client.close()
+        except Exception as exc:
+            logger.warning("S-UI HTTP session cleanup failed: %s", exc)
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception as exc:
+                logger.warning("Redis cleanup failed: %s", exc)
+        metrics.save_metrics()
+        logger.info("SUI Bot stopped")
 
 def run() -> None:
     try:
         asyncio.run(main())
+    except InvalidToken:
+        logger.critical("Telegram rejected BOT_TOKEN; update it with 'sudo sui-bot config'")
+        raise SystemExit(78) from None
     except (KeyboardInterrupt, SystemExit):
-        print("\n✅ Bot stopped.")
+        logger.info("SUI Bot interrupted")
 
 
 if __name__ == "__main__":
