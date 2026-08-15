@@ -1,5 +1,7 @@
 # SUI Bot
 
+[English](README.md) | [فارسی](README.fa.md)
+
 SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alireza0/s-ui) panel. It gives administrators a convenient Telegram interface for managing clients while letting each user view their own subscription, usage, links, and renewal options.
 
 ## Features
