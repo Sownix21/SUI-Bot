@@ -90,6 +90,7 @@ class Settings:
     payment_card_number: str
     payment_card_holder: str
     bot_display_name: str
+    hide_subscription_port: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -122,6 +123,7 @@ class Settings:
             payment_card_number=str(env("PAYMENT_CARD_NUMBER", "0000-0000-0000-0000")),
             payment_card_holder=str(env("PAYMENT_CARD_HOLDER", "")),
             bot_display_name=validate_display_name(env("BOT_DISPLAY_NAME", "SUI Bot")),
+            hide_subscription_port=env_bool("HIDE_SUBSCRIPTION_PORT", False),
         )
         settings.validate()
         return settings

@@ -117,6 +117,9 @@ RENEWAL_MONTH_OPTIONS = str(RUNTIME_SETTINGS.get("RENEWAL_MONTH_OPTIONS", SETTIN
 PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
 BOT_DISPLAY_NAME = validate_display_name(RUNTIME_SETTINGS.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
+HIDE_SUBSCRIPTION_PORT = str(
+    RUNTIME_SETTINGS.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
+).strip().lower() in {"1", "true", "yes", "on"}
 LANGUAGE_STORE_FILE = managed_data_path("user_languages.json")
 language_store = LanguageStore(LANGUAGE_STORE_FILE)
 EXPIRED_NOTIFICATIONS_FILE = managed_data_path("expired_notifications.json")
@@ -1172,12 +1175,17 @@ def build_settings_menu_text() -> str:
     )
     display_name = preserve_dynamic_text(BOT_DISPLAY_NAME)
     card_number = preserve_dynamic_text(ltr_isolate(PAYMENT_CARD_NUMBER))
+    port_status = tr(
+        ADMIN_TELEGRAM_ID,
+        "subscription_port_hidden" if HIDE_SUBSCRIPTION_PORT else "subscription_port_kept",
+    )
     return (
         "⚙️ Admin Settings\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
         f"💰 Price Per Month: {RENEWAL_MONTHLY_PRICE:,} Tooman\n"
         f"📦 Enabled Renewal Options: {months_text}\n"
         f"🏦 Card Number: {card_number}{holder_line}\n\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'subscription_link_mode')}: {port_status}\n\n"
         "Use buttons below to update renewal settings."
     )
 
@@ -1189,6 +1197,13 @@ def build_settings_menu_keyboard():
         [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
         [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
+        [InlineKeyboardButton(
+            tr(
+                ADMIN_TELEGRAM_ID,
+                "keep_subscription_port" if HIDE_SUBSCRIPTION_PORT else "remove_subscription_port",
+            ),
+            callback_data='settings_subscription_port',
+        )],
         [InlineKeyboardButton("💾 Backup & Restore", callback_data='settings_backup_restore')],
         [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
         [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
@@ -1250,7 +1265,8 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
-    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, renewal_month_options
+    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, HIDE_SUBSCRIPTION_PORT
+    global renewal_month_options
     load_assignments()
     language_store.load()
     metrics.load_metrics()
@@ -1264,6 +1280,9 @@ def reload_restored_state() -> None:
     PAYMENT_CARD_NUMBER = str(restored_settings.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
     PAYMENT_CARD_HOLDER = str(restored_settings.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
     BOT_DISPLAY_NAME = validate_display_name(restored_settings.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
+    HIDE_SUBSCRIPTION_PORT = str(
+        restored_settings.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
+    ).strip().lower() in {"1", "true", "yes", "on"}
     renewal_month_options = parse_renewal_month_options(RENEWAL_MONTH_OPTIONS)
 
 @rate_limited(admin_only=True)
@@ -1298,10 +1317,6 @@ async def restore_backup_file(update: Update, context: ContextTypes.DEFAULT_TYPE
                 bundle = await asyncio.to_thread(load_bundle, source)
                 restored = await asyncio.to_thread(restore_bundle, bundle, bot_state_paths())
             await asyncio.to_thread(reload_restored_state)
-            try:
-                await context.bot.set_my_name(name=BOT_DISPLAY_NAME)
-            except TelegramError as exc:
-                logger.warning("Restored display name locally but Telegram profile update failed: %s", exc)
         await status.edit_text(
             "✅ Backup restored successfully.\n\n"
             f"Restored sections: {', '.join(restored) or 'none'}\n"
@@ -1424,15 +1439,8 @@ async def settings_display_name_input(update: Update, context: ContextTypes.DEFA
 
     BOT_DISPLAY_NAME = value
     save_runtime_setting("BOT_DISPLAY_NAME", BOT_DISPLAY_NAME, RUNTIME_SETTINGS_FILE)
-    profile_warning = ""
-    try:
-        await context.bot.set_my_name(name=value)
-    except TelegramError as exc:
-        logger.warning("Telegram profile-name update failed: %s", exc)
-        profile_warning = f"\n\n{tr(update.effective_user.id, 'display_name_profile_failed')}"
     await update.message.reply_text(
-        tr(update.effective_user.id, "display_name_updated", name=preserve_dynamic_text(BOT_DISPLAY_NAME))
-        + profile_warning,
+        tr(update.effective_user.id, "display_name_updated", name=preserve_dynamic_text(BOT_DISPLAY_NAME)),
         reply_markup=build_settings_menu_keyboard(),
     )
     return ConversationHandler.END
@@ -2487,6 +2495,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
             )
+        elif data == 'settings_subscription_port':
+            if user_id != ADMIN_TELEGRAM_ID:
+                await localized_query_answer(query, "❌ Admin only", show_alert=True)
+                return
+            global HIDE_SUBSCRIPTION_PORT
+            if HIDE_SUBSCRIPTION_PORT:
+                HIDE_SUBSCRIPTION_PORT = False
+                save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", RUNTIME_SETTINGS_FILE)
+                await query.edit_message_text(
+                    build_settings_menu_text(),
+                    reply_markup=build_settings_menu_keyboard(),
+                )
+                await localized_query_answer(query, tr(user_id, "subscription_port_restored"), show_alert=True)
+            else:
+                await query.edit_message_text(
+                    tr(user_id, "subscription_port_warning"),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            tr(user_id, "confirm_remove_subscription_port"),
+                            callback_data='settings_subscription_port_confirm',
+                        )],
+                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='admin_settings')],
+                    ]),
+                )
+        elif data == 'settings_subscription_port_confirm':
+            if user_id != ADMIN_TELEGRAM_ID:
+                await localized_query_answer(query, "❌ Admin only", show_alert=True)
+                return
+            HIDE_SUBSCRIPTION_PORT = True
+            save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", RUNTIME_SETTINGS_FILE)
+            await query.edit_message_text(
+                build_settings_menu_text(),
+                reply_markup=build_settings_menu_keyboard(),
+            )
+            await localized_query_answer(query, tr(user_id, "subscription_port_removed"), show_alert=True)
         elif data == 'settings_backup_restore':
             await query.edit_message_text(
                 "💾 SUI Bot Backup & Restore\n\n"
@@ -2721,7 +2764,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             name = clients[0].get("name", "Unknown")
             base_url = await get_subscription_base_url()
-            main_url, json_url, clash_url = build_subscription_urls(base_url, name)
+            main_url, json_url, clash_url = build_subscription_urls(
+                base_url,
+                name,
+                remove_port=HIDE_SUBSCRIPTION_PORT,
+            )
             msg = (
                 f"{tr(user_id, 'subscription_links')}\n\n"
                 f"🌐 Main URL (V2rayNG & ETC):\n<code>{html.escape(main_url)}</code>\n\n"
@@ -4801,12 +4848,6 @@ async def main():
 
         async with app:
             try:
-                try:
-                    telegram_name = await app.bot.get_my_name()
-                    if telegram_name.name != BOT_DISPLAY_NAME:
-                        await app.bot.set_my_name(name=BOT_DISPLAY_NAME)
-                except TelegramError as exc:
-                    logger.warning("Could not synchronize the Telegram profile name: %s", exc)
                 await app.start()
                 application_started = True
                 await app.updater.start_polling(

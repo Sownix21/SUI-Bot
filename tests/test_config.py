@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from sui_bot.config import Settings, validate_display_name
@@ -29,3 +31,9 @@ def test_display_name_accepts_unicode_but_rejects_control_characters() -> None:
     assert validate_display_name("  سرویس من  ") == "سرویس من"
     with pytest.raises(RuntimeError, match="BOT_DISPLAY_NAME"):
         validate_display_name("bad\nname")
+
+
+def test_display_name_code_never_changes_telegram_profile() -> None:
+    source = (Path(__file__).parents[1] / "src" / "sui_bot" / "bot.py").read_text(encoding="utf-8")
+    assert ".set_my_name(" not in source
+    assert ".get_my_name(" not in source

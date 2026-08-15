@@ -29,6 +29,7 @@ RUNTIME_SETTING_KEYS = frozenset({
     "PAYMENT_CARD_NUMBER",
     "PAYMENT_CARD_HOLDER",
     "BOT_DISPLAY_NAME",
+    "HIDE_SUBSCRIPTION_PORT",
 })
 LANGUAGE_CODES = frozenset({"en", "fa", "ru", "zh"})
 
@@ -74,6 +75,9 @@ def _validate_state_entry(key: str, value: Any) -> None:
                 unicodedata.category(character).startswith("C") for character in normalized
             ):
                 raise ValueError("runtime settings contain an invalid bot display name")
+        hide_port = value.get("HIDE_SUBSCRIPTION_PORT")
+        if hide_port is not None and str(hide_port).strip().lower() not in {"true", "false"}:
+            raise ValueError("runtime settings contain an invalid subscription-port setting")
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):
         raise ValueError(f"{key} must be a JSON object")
 

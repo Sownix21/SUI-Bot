@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 def extract_load_metadata(data: dict[str, Any] | None) -> tuple[str, list[dict[str, Any]]]:
@@ -32,12 +32,29 @@ def build_web_panel_url(subscription_base: str, username: str) -> str:
     return f"https://{parsed.hostname}:2083/dF84Xaql5O9b1/{quote(username, safe='')}"
 
 
-def build_subscription_urls(subscription_base: str, username: str) -> tuple[str, str, str]:
-    """Preserve the S-UI-provided scheme, port, and path exactly."""
+def build_subscription_urls(
+    subscription_base: str,
+    username: str,
+    *,
+    remove_port: bool = False,
+) -> tuple[str, str, str]:
+    """Build user links, optionally omitting only the URL's explicit port."""
     parsed = urlsplit(subscription_base)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("invalid subscription base URL")
-    base = subscription_base.rstrip("/")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid subscription base URL port") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("subscription base URL must not contain credentials")
+    if remove_port:
+        hostname = parsed.hostname
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        base = urlunsplit((parsed.scheme, hostname, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
+    else:
+        base = subscription_base.rstrip("/")
     encoded_name = quote(username, safe="")
     main = f"{base}/{encoded_name}/"
     return main, f"{main}?format=json", f"{main}?format=clash"

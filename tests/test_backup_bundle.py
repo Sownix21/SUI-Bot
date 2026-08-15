@@ -53,3 +53,10 @@ def test_invalid_display_name_in_runtime_backup_is_rejected(tmp_path):
     source.write_text('{"BOT_DISPLAY_NAME": "bad\\nname"}', encoding="utf-8")
     with pytest.raises(ValueError, match="display name"):
         build_bundle({"runtime_settings": source}, {})
+
+
+def test_invalid_subscription_port_setting_in_backup_is_rejected(tmp_path):
+    source = tmp_path / "runtime_settings.json"
+    source.write_text('{"HIDE_SUBSCRIPTION_PORT": "sometimes"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="subscription-port"):
+        build_bundle({"runtime_settings": source}, {})

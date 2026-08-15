@@ -16,7 +16,8 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 - Create size-limited database backups and report server health.
 - Export and restore bot assignments, user preferences, metrics, runtime configuration, and cached state as one validated file.
 - Support English, Persian, Russian, and Chinese per Telegram account.
-- Let each owner customize the bot display name from the administrator settings.
+- Let each owner customize the name used inside bot messages without changing the Telegram profile.
+- Optionally hide the explicit port in user-facing subscription links after a reverse-proxy warning and confirmation.
 - Run continuously as a hardened systemd service.
 - Provide a global `sui-bot` management command.
 
@@ -76,9 +77,11 @@ Open the bot and send:
 
 Every account—including the administrator—is asked to select English, Persian, Russian, or Chinese the first time it starts the bot. The language can be changed later using the Language button.
 
-The selected language applies to the complete Telegram interface: administrator menus and workflows, user subscription and renewal screens, inline buttons, validation/errors, scheduled reminders, reports, backup notifications, and captions. Server-provided names, descriptions, IDs, commands, and URLs remain unchanged.
+The selected language applies to the complete Telegram interface: administrator menus and workflows, user subscription and renewal screens, inline buttons, validation/errors, scheduled reminders, reports, backup notifications, and captions. Server-provided names, descriptions, IDs, and commands remain unchanged. URLs also remain unchanged unless the administrator explicitly enables the subscription-port removal option described below.
 
-The administrator can change the owner-facing brand from **Settings → Set display name**. This updates both the name used throughout bot messages and the Telegram bot profile name; Linux service names and data paths remain `sui-bot`.
+The administrator can change the owner-facing brand from **Settings → Set message display name**. This changes only the name written inside messages produced by the bot. It never changes the Telegram profile name or `@username`; those remain exactly as configured through BotFather. Linux service names and data paths also remain `sui-bot`.
+
+The admin-only **Remove port from subscription links** setting can produce clean user-facing URLs such as `https://example.com/path/user/` instead of `https://example.com:2096/path/user/`. Enabling it requires a separate confirmation after a warning. Configure nginx, another reverse proxy, or equivalent server routing first so portless requests reach the S-UI subscription endpoint; otherwise the rewritten links will fail. The bot does not modify nginx or the S-UI server.
 
 Expiry reminders include direct renewal actions. A single expiring subscription gets one renewal action, while reminders containing several expiring subscriptions provide a separate action for each subscription.
 

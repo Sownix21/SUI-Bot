@@ -46,7 +46,8 @@ EDITABLE_FIELDS = [
     ("RENEWAL_MONTH_OPTIONS", "Renewal month options"),
     ("PAYMENT_CARD_NUMBER", "Payment card number"),
     ("PAYMENT_CARD_HOLDER", "Payment card holder"),
-    ("BOT_DISPLAY_NAME", "Telegram display name"),
+    ("BOT_DISPLAY_NAME", "Message display name"),
+    ("HIDE_SUBSCRIPTION_PORT", "Hide subscription-link port"),
 ]
 
 
@@ -149,7 +150,7 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_service_url(values["SUI_HOST"], allow_insecure_http=allow_http)
     except (RuntimeError, ValueError) as exc:
         errors.append(str(exc))
-    for boolean_key in ("REDIS_ENABLED",):
+    for boolean_key in ("REDIS_ENABLED", "HIDE_SUBSCRIPTION_PORT"):
         try:
             _bool_value(values.get(boolean_key, "false"))
         except ValueError:

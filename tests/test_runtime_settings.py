@@ -16,3 +16,9 @@ def test_display_name_is_an_allowed_runtime_setting(tmp_path) -> None:
     target = tmp_path / "settings.json"
     save_runtime_setting("BOT_DISPLAY_NAME", "Owner VPN", str(target))
     assert load_runtime_settings(str(target))["BOT_DISPLAY_NAME"] == "Owner VPN"
+
+
+def test_subscription_port_preference_is_an_allowed_runtime_setting(tmp_path) -> None:
+    target = tmp_path / "settings.json"
+    save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", str(target))
+    assert load_runtime_settings(str(target))["HIDE_SUBSCRIPTION_PORT"] == "true"
