@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from .config import validate_display_name
 from .security import validate_service_url
 
 SERVICE_NAME = "sui-bot.service"
@@ -45,6 +46,7 @@ EDITABLE_FIELDS = [
     ("RENEWAL_MONTH_OPTIONS", "Renewal month options"),
     ("PAYMENT_CARD_NUMBER", "Payment card number"),
     ("PAYMENT_CARD_HOLDER", "Payment card holder"),
+    ("BOT_DISPLAY_NAME", "Telegram display name"),
 ]
 
 
@@ -184,6 +186,11 @@ def validate_environment(values: dict[str, str]) -> list[str]:
                 raise ValueError
         except ValueError:
             errors.append("RENEWAL_MONTH_OPTIONS must contain comma-separated positive integers")
+    if values.get("BOT_DISPLAY_NAME"):
+        try:
+            validate_display_name(values["BOT_DISPLAY_NAME"])
+        except RuntimeError as exc:
+            errors.append(str(exc))
     state_root = STATE_DIR.resolve()
     for key in ("BACKUP_DIR", "ASSIGNMENTS_FILE", "METRICS_FILE", "SUB_CACHE_FILE"):
         if not values.get(key, "").strip():

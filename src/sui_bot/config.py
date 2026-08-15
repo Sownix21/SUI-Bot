@@ -7,6 +7,7 @@ is responsible for creating a permission-restricted environment file.
 from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -14,6 +15,17 @@ from typing import Any, Callable, TypeVar
 from dotenv import load_dotenv
 
 T = TypeVar("T")
+
+
+def validate_display_name(value: Any) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError("BOT_DISPLAY_NAME must be text")
+    normalized = unicodedata.normalize("NFC", value.strip())
+    if not 2 <= len(normalized) <= 48:
+        raise RuntimeError("BOT_DISPLAY_NAME must contain 2-48 characters")
+    if any(unicodedata.category(character).startswith("C") for character in normalized):
+        raise RuntimeError("BOT_DISPLAY_NAME must not contain control or formatting characters")
+    return normalized
 
 
 def _load_local_env() -> None:
@@ -77,6 +89,7 @@ class Settings:
     renewal_month_options: str
     payment_card_number: str
     payment_card_holder: str
+    bot_display_name: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -108,6 +121,7 @@ class Settings:
             renewal_month_options=str(env("RENEWAL_MONTH_OPTIONS", "1,2,3")),
             payment_card_number=str(env("PAYMENT_CARD_NUMBER", "0000-0000-0000-0000")),
             payment_card_holder=str(env("PAYMENT_CARD_HOLDER", "")),
+            bot_display_name=validate_display_name(env("BOT_DISPLAY_NAME", "SUI Bot")),
         )
         settings.validate()
         return settings

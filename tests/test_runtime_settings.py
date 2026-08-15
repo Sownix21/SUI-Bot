@@ -11,3 +11,8 @@ def test_only_non_secret_settings_can_be_persisted(tmp_path) -> None:
     with pytest.raises(ValueError, match="Refusing"):
         save_runtime_setting("BOT_TOKEN", "secret", str(target))
 
+
+def test_display_name_is_an_allowed_runtime_setting(tmp_path) -> None:
+    target = tmp_path / "settings.json"
+    save_runtime_setting("BOT_DISPLAY_NAME", "Owner VPN", str(target))
+    assert load_runtime_settings(str(target))["BOT_DISPLAY_NAME"] == "Owner VPN"

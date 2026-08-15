@@ -1,4 +1,4 @@
-from sui_bot.outgoing_localization import localize_outgoing_text, preserve_dynamic_text
+from sui_bot.outgoing_localization import copyable_ltr_code, ltr_isolate, localize_outgoing_text, preserve_dynamic_text
 
 
 def test_admin_message_is_localized_without_changing_identifiers():
@@ -34,3 +34,18 @@ def test_server_values_are_preserved_even_when_they_match_fixed_ui_words():
 
     assert localize_outgoing_text("fa", source) == "نام کاربری: Back\nبازگشت"
     assert localize_outgoing_text("en", server_name) == "Back"
+
+
+def test_owner_brand_replaces_fixed_brand_but_not_server_values():
+    source = f"Welcome to SUI Bot\nServer: {preserve_dynamic_text('SUI Bot')}"
+    assert localize_outgoing_text("en", source, display_name="Owner VPN") == (
+        "Welcome to Owner VPN\nServer: SUI Bot"
+    )
+    assert "Owner VPN" in localize_outgoing_text("fa", "SUI Bot Backup & Restore", display_name="Owner VPN")
+
+
+def test_ltr_isolate_keeps_card_number_copy_value_unchanged():
+    isolated = ltr_isolate("1234-5678-9012-3456")
+    assert isolated == "\u20661234-5678-9012-3456\u2069"
+    assert isolated.strip("\u2066\u2069") == "1234-5678-9012-3456"
+    assert copyable_ltr_code("1234-5678") == "\u2066<code>1234-5678</code>\u2069"

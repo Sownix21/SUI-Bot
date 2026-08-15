@@ -9,10 +9,12 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 - Display usage, expiry, status, subscription links, and web-panel links.
 - Accept free-form group names when creating or editing clients.
 - Handle renewal plans, payment receipts, approval, and rejection.
+- Show payment card numbers left-to-right and as tap-to-copy inline code in every language.
 - Send broadcasts and expiry reminders.
 - Create size-limited database backups and report server health.
 - Export and restore bot assignments, user preferences, metrics, runtime configuration, and cached state as one validated file.
 - Support English, Persian, Russian, and Chinese per Telegram account.
+- Let each owner customize the bot display name from the administrator settings.
 - Run continuously as a hardened systemd service.
 - Provide a global `sui-bot` management command.
 
@@ -73,6 +75,10 @@ Open the bot and send:
 Every account—including the administrator—is asked to select English, Persian, Russian, or Chinese the first time it starts the bot. The language can be changed later using the Language button.
 
 The selected language applies to the complete Telegram interface: administrator menus and workflows, user subscription and renewal screens, inline buttons, validation/errors, scheduled reminders, reports, backup notifications, and captions. Server-provided names, descriptions, IDs, commands, and URLs remain unchanged.
+
+The administrator can change the owner-facing brand from **Settings → Set display name**. This updates both the name used throughout bot messages and the Telegram bot profile name; Linux service names and data paths remain `sui-bot`.
+
+Expiry reminders include direct renewal actions. A single expiring subscription gets one renewal action, while reminders containing several expiring subscriptions provide a separate action for each subscription.
 
 Users with one assigned client see **My Subscription** and go directly to it. **My Subscriptions** and the subscription-list back button are shown only to users with multiple assigned clients.
 

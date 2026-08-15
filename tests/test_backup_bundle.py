@@ -46,3 +46,10 @@ def test_invalid_assignment_schema_is_rejected(tmp_path):
     source.write_text('{"100": [0, "bad"]}', encoding="utf-8")
     with pytest.raises(ValueError, match="invalid Telegram or client ID"):
         build_bundle({"assignments": source}, {})
+
+
+def test_invalid_display_name_in_runtime_backup_is_rejected(tmp_path):
+    source = tmp_path / "runtime_settings.json"
+    source.write_text('{"BOT_DISPLAY_NAME": "bad\\nname"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="display name"):
+        build_bundle({"runtime_settings": source}, {})

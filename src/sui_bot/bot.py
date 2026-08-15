@@ -29,7 +29,7 @@ from telegram.request import HTTPXRequest
 
 from .backup import BackupTooLargeError, stream_response_to_file
 from .backup_bundle import MAX_BUNDLE_BYTES, build_bundle, load_bundle, restore_bundle, write_bundle
-from .config import Settings
+from .config import Settings, validate_display_name
 from .reporting import (
     expiring_clients_with_assignments,
     load_expired_notification_ids,
@@ -39,7 +39,13 @@ from .runtime_settings import load_runtime_settings, save_runtime_setting
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
 from .navigation import has_multiple_subscriptions
-from .outgoing_localization import localize_inline_markup, localize_outgoing_text, preserve_dynamic_text
+from .outgoing_localization import (
+    copyable_ltr_code,
+    ltr_isolate,
+    localize_inline_markup,
+    localize_outgoing_text,
+    preserve_dynamic_text,
+)
 from .sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata
 
 try:
@@ -110,6 +116,7 @@ RENEWAL_MONTHLY_PRICE = int(RUNTIME_SETTINGS.get("RENEWAL_MONTHLY_PRICE", SETTIN
 RENEWAL_MONTH_OPTIONS = str(RUNTIME_SETTINGS.get("RENEWAL_MONTH_OPTIONS", SETTINGS.renewal_month_options))
 PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
+BOT_DISPLAY_NAME = validate_display_name(RUNTIME_SETTINGS.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
 LANGUAGE_STORE_FILE = managed_data_path("user_languages.json")
 language_store = LanguageStore(LANGUAGE_STORE_FILE)
 EXPIRED_NOTIFICATIONS_FILE = managed_data_path("expired_notifications.json")
@@ -154,8 +161,8 @@ CREATE_USER_NAME, CREATE_USER_INBOUNDS, CREATE_USER_VOLUME, CREATE_USER_EXPIRY, 
 EDIT_USER_GET_ID, EDIT_USER_NAME, EDIT_USER_INBOUNDS, EDIT_USER_VOLUME, EDIT_USER_EXPIRY, EDIT_USER_DESC, EDIT_USER_GROUP, EDIT_USER_ENABLE, EDIT_USER_REGEN = range(6, 15)
 DELETE_USER_GET_ID, DELETE_USER_CONFIRM = range(15, 17)
 BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(17, 19)
-SETTINGS_CARD_NUMBER, SETTINGS_CARD_HOLDER = range(19, 21)
-RESTORE_BACKUP_FILE = 21
+SETTINGS_CARD_NUMBER, SETTINGS_CARD_HOLDER, SETTINGS_DISPLAY_NAME = range(19, 22)
+RESTORE_BACKUP_FILE = 22
 
 _user_requests = {}
 _blocked_users = {}
@@ -413,7 +420,9 @@ def tr(user_id: int, key: str, **values: Any) -> str:
     return translate(user_language(user_id), key, **values)
 
 async def localized_query_answer(query, text=None, *args, **kwargs):
-    localized = localize_outgoing_text(user_language(query.from_user.id), text)
+    localized = localize_outgoing_text(
+        user_language(query.from_user.id), text, display_name=BOT_DISPLAY_NAME
+    )
     return await query.answer(localized, *args, **kwargs)
 
 def localized_remaining_time(expiry_timestamp: int, user_id: int) -> str:
@@ -446,33 +455,49 @@ class LocalizedExtBot(ExtBot):
 
     async def send_message(self, chat_id, text, *args, **kwargs):
         language = self._language(chat_id)
-        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
-        return await super().send_message(chat_id, localize_outgoing_text(language, text), *args, **kwargs)
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
+        return await super().send_message(
+            chat_id, localize_outgoing_text(language, text, display_name=BOT_DISPLAY_NAME), *args, **kwargs
+        )
 
     async def edit_message_text(self, text, chat_id=None, *args, **kwargs):
         effective_chat_id = chat_id
         language = self._language(effective_chat_id)
-        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
         return await super().edit_message_text(
-            localize_outgoing_text(language, text), chat_id, *args, **kwargs
+            localize_outgoing_text(language, text, display_name=BOT_DISPLAY_NAME), chat_id, *args, **kwargs
         )
 
     async def send_document(self, chat_id, document, *args, **kwargs):
         language = self._language(chat_id)
-        kwargs["caption"] = localize_outgoing_text(language, kwargs.get("caption"))
-        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        kwargs["caption"] = localize_outgoing_text(
+            language, kwargs.get("caption"), display_name=BOT_DISPLAY_NAME
+        )
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
         return await super().send_document(chat_id, document, *args, **kwargs)
 
     async def send_photo(self, chat_id, photo, *args, **kwargs):
         language = self._language(chat_id)
-        kwargs["caption"] = localize_outgoing_text(language, kwargs.get("caption"))
-        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        kwargs["caption"] = localize_outgoing_text(
+            language, kwargs.get("caption"), display_name=BOT_DISPLAY_NAME
+        )
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
         return await super().send_photo(chat_id, photo, *args, **kwargs)
 
     async def edit_message_caption(self, *args, chat_id=None, caption=None, **kwargs):
         language = self._language(chat_id)
-        localized_caption = localize_outgoing_text(language, caption)
-        kwargs["reply_markup"] = localize_inline_markup(kwargs.get("reply_markup"), language, self)
+        localized_caption = localize_outgoing_text(language, caption, display_name=BOT_DISPLAY_NAME)
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
         return await super().edit_message_caption(
             *args, chat_id=chat_id, caption=localized_caption, **kwargs
         )
@@ -1141,12 +1166,18 @@ def renewal_amount(months: int) -> int:
 
 def build_settings_menu_text() -> str:
     months_text = ", ".join(f"{m}M" for m in get_renewal_month_options())
-    holder_line = f"\n👤 Card Holder: {PAYMENT_CARD_HOLDER}" if PAYMENT_CARD_HOLDER else ""
+    holder_line = (
+        f"\n👤 Card Holder: {preserve_dynamic_text(PAYMENT_CARD_HOLDER)}"
+        if PAYMENT_CARD_HOLDER else ""
+    )
+    display_name = preserve_dynamic_text(BOT_DISPLAY_NAME)
+    card_number = preserve_dynamic_text(ltr_isolate(PAYMENT_CARD_NUMBER))
     return (
         "⚙️ Admin Settings\n\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
         f"💰 Price Per Month: {RENEWAL_MONTHLY_PRICE:,} Tooman\n"
         f"📦 Enabled Renewal Options: {months_text}\n"
-        f"🏦 Card Number: {PAYMENT_CARD_NUMBER}{holder_line}\n\n"
+        f"🏦 Card Number: {card_number}{holder_line}\n\n"
         "Use buttons below to update renewal settings."
     )
 
@@ -1157,6 +1188,7 @@ def build_settings_menu_keyboard():
         [InlineKeyboardButton("➖ 50K", callback_data='settings_price_minus_50000'), InlineKeyboardButton("➕ 50K", callback_data='settings_price_plus_50000')],
         [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
         [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
         [InlineKeyboardButton("💾 Backup & Restore", callback_data='settings_backup_restore')],
         [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
         [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
@@ -1190,6 +1222,7 @@ def backup_configuration_summary() -> dict[str, Any]:
         "items_per_page": ITEMS_PER_PAGE,
         "rate_limit_window": RATE_LIMIT_WINDOW,
         "max_requests_per_window": MAX_REQUESTS_PER_WINDOW,
+        "bot_display_name": BOT_DISPLAY_NAME,
         "secrets_included": False,
         "secret_notice": "BOT_TOKEN and SUI_TOKEN are intentionally excluded",
     }
@@ -1217,7 +1250,7 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
-    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, renewal_month_options
+    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, renewal_month_options
     load_assignments()
     language_store.load()
     metrics.load_metrics()
@@ -1230,6 +1263,7 @@ def reload_restored_state() -> None:
     RENEWAL_MONTH_OPTIONS = str(restored_settings.get("RENEWAL_MONTH_OPTIONS", SETTINGS.renewal_month_options))
     PAYMENT_CARD_NUMBER = str(restored_settings.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
     PAYMENT_CARD_HOLDER = str(restored_settings.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
+    BOT_DISPLAY_NAME = validate_display_name(restored_settings.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
     renewal_month_options = parse_renewal_month_options(RENEWAL_MONTH_OPTIONS)
 
 @rate_limited(admin_only=True)
@@ -1264,6 +1298,10 @@ async def restore_backup_file(update: Update, context: ContextTypes.DEFAULT_TYPE
                 bundle = await asyncio.to_thread(load_bundle, source)
                 restored = await asyncio.to_thread(restore_bundle, bundle, bot_state_paths())
             await asyncio.to_thread(reload_restored_state)
+            try:
+                await context.bot.set_my_name(name=BOT_DISPLAY_NAME)
+            except TelegramError as exc:
+                logger.warning("Restored display name locally but Telegram profile update failed: %s", exc)
         await status.edit_text(
             "✅ Backup restored successfully.\n\n"
             f"Restored sections: {', '.join(restored) or 'none'}\n"
@@ -1323,6 +1361,13 @@ async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return SETTINGS_CARD_HOLDER
 
+    if query.data == "settings_set_display_name":
+        await query.edit_message_text(
+            tr(query.from_user.id, "enter_display_name"),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(query.from_user.id, "back"), callback_data='admin_settings')]])
+        )
+        return SETTINGS_DISPLAY_NAME
+
     return ConversationHandler.END
 
 async def settings_card_number_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1366,6 +1411,32 @@ async def settings_card_holder_input(update: Update, context: ContextTypes.DEFAU
     )
     return ConversationHandler.END
 
+
+async def settings_display_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_DISPLAY_NAME
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return ConversationHandler.END
+    try:
+        value = validate_display_name(update.message.text)
+    except RuntimeError:
+        await update.message.reply_text(tr(update.effective_user.id, "display_name_invalid"))
+        return SETTINGS_DISPLAY_NAME
+
+    BOT_DISPLAY_NAME = value
+    save_runtime_setting("BOT_DISPLAY_NAME", BOT_DISPLAY_NAME, RUNTIME_SETTINGS_FILE)
+    profile_warning = ""
+    try:
+        await context.bot.set_my_name(name=value)
+    except TelegramError as exc:
+        logger.warning("Telegram profile-name update failed: %s", exc)
+        profile_warning = f"\n\n{tr(update.effective_user.id, 'display_name_profile_failed')}"
+    await update.message.reply_text(
+        tr(update.effective_user.id, "display_name_updated", name=preserve_dynamic_text(BOT_DISPLAY_NAME))
+        + profile_warning,
+        reply_markup=build_settings_menu_keyboard(),
+    )
+    return ConversationHandler.END
+
 async def settings_card_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Settings edit canceled.", reply_markup=build_settings_menu_keyboard())
     return ConversationHandler.END
@@ -1399,6 +1470,22 @@ def subscription_keyboard(user_id: int, client_id: int, web_panel_url: str):
         keyboard.append([InlineKeyboardButton(tr(user_id, "back_subscriptions"), callback_data='my_usage')])
     keyboard.append([InlineKeyboardButton(tr(user_id, "main_menu"), callback_data='main_menu')])
     return InlineKeyboardMarkup(keyboard)
+
+
+def renewal_reminder_keyboard(user_id: int, reminders: list[dict]) -> InlineKeyboardMarkup:
+    if len(reminders) == 1:
+        reminder = reminders[0]
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(tr(user_id, "renew"), callback_data=f"renew_start_{reminder['client_id']}")
+        ]])
+
+    rows = []
+    for reminder in reminders:
+        description = " ".join(str(reminder.get("desc") or reminder.get("name") or reminder["client_id"]).split())
+        short_description = description if len(description) <= 28 else f"{description[:27]}…"
+        label = f"{tr(user_id, 'renew')} — {preserve_dynamic_text(short_description)}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"renew_start_{reminder['client_id']}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def get_pagination_keyboard(current_page: int, total_pages: int, prefix: str):
@@ -2708,7 +2795,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "created_at": datetime.now().timestamp()
             }
 
-            holder_line = f"\n{tr(user_id, 'card_holder_value', holder=PAYMENT_CARD_HOLDER)}" if PAYMENT_CARD_HOLDER else ""
+            holder_line = (
+                f"\n{tr(user_id, 'card_holder_value', holder=preserve_dynamic_text(html.escape(PAYMENT_CARD_HOLDER)))}"
+                if PAYMENT_CARD_HOLDER else ""
+            )
+            card_number = copyable_ltr_code(PAYMENT_CARD_NUMBER)
             keyboard = [
                 [InlineKeyboardButton(tr(user_id, "cancel"), callback_data=f'renew_cancel_{client_id}')],
                 [InlineKeyboardButton(tr(user_id, "back"), callback_data=f'renew_start_{client_id}')]
@@ -2717,9 +2808,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{tr(user_id, 'renew_payment')}\n\n"
                 f"{tr(user_id, 'duration_value', months=months)}\n"
                 f"{tr(user_id, 'amount_value', amount=amount)}\n"
-                f"{tr(user_id, 'card_number_value', card_number=PAYMENT_CARD_NUMBER)}{holder_line}\n\n"
+                f"{tr(user_id, 'card_number_value', card_number=card_number)}{holder_line}\n\n"
                 f"{tr(user_id, 'payment_instructions')}",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
             )
         elif data.startswith('renew_cancel_'):
             context.user_data.pop('pending_renew_submission', None)
@@ -3779,7 +3871,8 @@ async def daily_subscription_reminder(app):
 
                     await app.bot.send_message(
                         chat_id=tg_id,
-                        text=message
+                        text=message,
+                        reply_markup=renewal_reminder_keyboard(tg_id, reminders),
                     )
 
                     # Add each reminder to successful list for reporting
@@ -4646,10 +4739,14 @@ async def main():
     )
 
     settings_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(settings_card_start, pattern='^settings_set_card_number$|^settings_set_card_holder$')],
+        entry_points=[CallbackQueryHandler(
+            settings_card_start,
+            pattern='^settings_set_card_number$|^settings_set_card_holder$|^settings_set_display_name$',
+        )],
         states={
             SETTINGS_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_number_input)],
             SETTINGS_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_holder_input)],
+            SETTINGS_DISPLAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_display_name_input)],
         },
         fallbacks=[CommandHandler('cancel', settings_card_cancel)],
         allow_reentry=True
@@ -4704,6 +4801,12 @@ async def main():
 
         async with app:
             try:
+                try:
+                    telegram_name = await app.bot.get_my_name()
+                    if telegram_name.name != BOT_DISPLAY_NAME:
+                        await app.bot.set_my_name(name=BOT_DISPLAY_NAME)
+                except TelegramError as exc:
+                    logger.warning("Could not synchronize the Telegram profile name: %s", exc)
                 await app.start()
                 application_started = True
                 await app.updater.start_polling(

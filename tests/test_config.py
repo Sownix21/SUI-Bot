@@ -1,6 +1,6 @@
 import pytest
 
-from sui_bot.config import Settings
+from sui_bot.config import Settings, validate_display_name
 
 
 def test_runtime_settings_reject_invalid_positive_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,3 +23,9 @@ def test_runtime_settings_reject_invalid_renewal_months(monkeypatch: pytest.Monk
 
     with pytest.raises(RuntimeError, match="RENEWAL_MONTH_OPTIONS"):
         Settings.from_env()
+
+
+def test_display_name_accepts_unicode_but_rejects_control_characters() -> None:
+    assert validate_display_name("  سرویس من  ") == "سرویس من"
+    with pytest.raises(RuntimeError, match="BOT_DISPLAY_NAME"):
+        validate_display_name("bad\nname")

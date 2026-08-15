@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import re
 from typing import Any
 
@@ -266,12 +267,25 @@ SOURCE_ALIASES = {
 }
 
 _DYNAMIC_VALUE_RE = re.compile(r"\ue100([A-Za-z0-9_-]+)\ue101")
+DEFAULT_BRAND_ALIASES = ("S-UI Bot", "SUI Bot", "ربات SUI")
 
 
 def preserve_dynamic_text(value: Any) -> str:
     """Mark server/user content so the fixed-text translator cannot alter it."""
     encoded = base64.urlsafe_b64encode(str(value).encode("utf-8")).decode("ascii").rstrip("=")
     return f"\ue100{encoded}\ue101"
+
+
+def ltr_isolate(value: Any) -> str:
+    """Keep identifiers such as card numbers left-to-right inside RTL text."""
+    return f"\u2066{value}\u2069"
+
+
+def copyable_ltr_code(value: Any) -> str:
+    """Render a safe Telegram inline-code value that stays LTR and is tap-copyable."""
+    # Isolates sit outside the code entity: Telegram displays it LTR while the
+    # copied entity contains only the original value, without invisible marks.
+    return f"\u2066<code>{html.escape(str(value))}</code>\u2069"
 
 
 def _restore_dynamic_text(text: str) -> str:
@@ -283,23 +297,26 @@ def _restore_dynamic_text(text: str) -> str:
     return _DYNAMIC_VALUE_RE.sub(decode, text)
 
 
-def localize_outgoing_text(language: str, text: str | None) -> str | None:
+def localize_outgoing_text(language: str, text: str | None, *, display_name: str | None = None) -> str | None:
     if not text:
         return text
     result = text
-    if language == "en":
-        return _restore_dynamic_text(result)
-    for source, english in SOURCE_ALIASES.items():
-        result = result.replace(source, english)
-    for source, translated in sorted(PHRASES.get(language, {}).items(), key=lambda item: len(item[0]), reverse=True):
-        prefix = r"(?<![A-Za-z])" if source[:1].isalpha() else ""
-        suffix = r"(?![A-Za-z])" if source[-1:].isalpha() else ""
-        result = re.sub(prefix + re.escape(source) + suffix, translated, result, flags=re.IGNORECASE)
+    if language != "en":
+        for source, english in SOURCE_ALIASES.items():
+            result = result.replace(source, english)
+        for source, translated in sorted(PHRASES.get(language, {}).items(), key=lambda item: len(item[0]), reverse=True):
+            prefix = r"(?<![A-Za-z])" if source[:1].isalpha() else ""
+            suffix = r"(?![A-Za-z])" if source[-1:].isalpha() else ""
+            result = re.sub(prefix + re.escape(source) + suffix, translated, result, flags=re.IGNORECASE)
+    if display_name:
+        protected_name = preserve_dynamic_text(display_name)
+        for alias in DEFAULT_BRAND_ALIASES:
+            result = result.replace(alias, protected_name)
     return _restore_dynamic_text(result)
 
 
-def localize_inline_markup(markup: Any, language: str, bot: Any) -> Any:
-    if markup is None or language == "en" or not hasattr(markup, "inline_keyboard"):
+def localize_inline_markup(markup: Any, language: str, bot: Any, *, display_name: str | None = None) -> Any:
+    if markup is None or not hasattr(markup, "inline_keyboard"):
         return markup
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -308,7 +325,7 @@ def localize_inline_markup(markup: Any, language: str, bot: Any) -> Any:
         localized_row = []
         for button in row:
             data = button.to_dict()
-            data["text"] = localize_outgoing_text(language, data.get("text"))
+            data["text"] = localize_outgoing_text(language, data.get("text"), display_name=display_name)
             localized_row.append(InlineKeyboardButton.de_json(data, bot))
         rows.append(localized_row)
     return InlineKeyboardMarkup(rows)

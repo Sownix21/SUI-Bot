@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -27,6 +28,7 @@ RUNTIME_SETTING_KEYS = frozenset({
     "RENEWAL_MONTH_OPTIONS",
     "PAYMENT_CARD_NUMBER",
     "PAYMENT_CARD_HOLDER",
+    "BOT_DISPLAY_NAME",
 })
 LANGUAGE_CODES = frozenset({"en", "fa", "ru", "zh"})
 
@@ -65,6 +67,13 @@ def _validate_state_entry(key: str, value: Any) -> None:
     elif key == "runtime_settings":
         if not isinstance(value, dict) or set(value) - RUNTIME_SETTING_KEYS:
             raise ValueError("runtime settings contain unsupported keys")
+        display_name = value.get("BOT_DISPLAY_NAME")
+        if display_name is not None:
+            normalized = unicodedata.normalize("NFC", display_name.strip()) if isinstance(display_name, str) else ""
+            if not 2 <= len(normalized) <= 48 or any(
+                unicodedata.category(character).startswith("C") for character in normalized
+            ):
+                raise ValueError("runtime settings contain an invalid bot display name")
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):
         raise ValueError(f"{key} must be a JSON object")
 
