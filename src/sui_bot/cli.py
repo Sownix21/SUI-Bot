@@ -604,6 +604,7 @@ def configure_web_panel() -> None:
     print("\nSUI Bot web panel enabled successfully.")
     print(f"User URL format: https://{domain}:{dashboard_port}/{route}/<S-UI-username>")
     print("Clean portless subscription URLs were enabled automatically.")
+    print("Enable the user-facing Web Panel button from Telegram: Admin Settings -> Enable Web Panel.")
 
 
 def remove_web_panel(*, confirmed: bool = False) -> None:
@@ -629,6 +630,7 @@ def remove_web_panel(*, confirmed: bool = False) -> None:
         environment_written = True
         save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", str(runtime_path))
         runtime_written = True
+        save_runtime_setting("WEB_PANEL_ENABLED", "false", str(runtime_path))
         if shutil.which("chown"):
             shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
         if systemctl("restart") != 0:
@@ -653,6 +655,14 @@ def remove_web_panel(*, confirmed: bool = False) -> None:
                 )
             else:
                 remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(runtime_path))
+            if "WEB_PANEL_ENABLED" in old_runtime_settings:
+                save_runtime_setting(
+                    "WEB_PANEL_ENABLED",
+                    str(old_runtime_settings["WEB_PANEL_ENABLED"]),
+                    str(runtime_path),
+                )
+            else:
+                remove_runtime_setting("WEB_PANEL_ENABLED", str(runtime_path))
             if shutil.which("chown"):
                 shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
         if environment_written:

@@ -62,6 +62,13 @@ def test_invalid_subscription_port_setting_in_backup_is_rejected(tmp_path):
         build_bundle({"runtime_settings": source}, {})
 
 
+def test_invalid_web_panel_setting_in_backup_is_rejected(tmp_path):
+    source = tmp_path / "runtime_settings.json"
+    source.write_text('{"WEB_PANEL_ENABLED": "sometimes"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="web-panel"):
+        build_bundle({"runtime_settings": source}, {})
+
+
 def test_connection_guides_are_validated_in_backup(tmp_path):
     source = tmp_path / "connection_guides.json"
     source.write_text(

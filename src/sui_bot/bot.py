@@ -119,6 +119,9 @@ PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.p
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
 BOT_DISPLAY_NAME = validate_display_name(RUNTIME_SETTINGS.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
 WEB_PANEL_BASE_URL = SETTINGS.web_panel_base_url
+WEB_PANEL_ENABLED = str(RUNTIME_SETTINGS.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
 SUBSCRIPTION_PUBLIC_ORIGIN = SETTINGS.subscription_public_origin
 HIDE_SUBSCRIPTION_PORT = str(
     RUNTIME_SETTINGS.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
@@ -1185,6 +1188,13 @@ def build_settings_menu_text() -> str:
         ADMIN_TELEGRAM_ID,
         "subscription_port_hidden" if HIDE_SUBSCRIPTION_PORT else "subscription_port_kept",
     )
+    web_panel_status_key = (
+        "web_panel_enabled"
+        if WEB_PANEL_ENABLED and WEB_PANEL_BASE_URL
+        else "web_panel_pending"
+        if WEB_PANEL_ENABLED
+        else "web_panel_disabled"
+    )
     return (
         "⚙️ Admin Settings\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
@@ -1192,6 +1202,7 @@ def build_settings_menu_text() -> str:
         f"📦 Enabled Renewal Options: {months_text}\n"
         f"🏦 Card Number: {card_number}{holder_line}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'subscription_link_mode')}: {port_status}\n\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'web_panel_setting')}: {tr(ADMIN_TELEGRAM_ID, web_panel_status_key)}\n\n"
         "Use buttons below to update renewal settings."
     )
 
@@ -1210,6 +1221,10 @@ def build_settings_menu_keyboard():
                 "keep_subscription_port" if HIDE_SUBSCRIPTION_PORT else "remove_subscription_port",
             ),
             callback_data='settings_subscription_port',
+        )],
+        [InlineKeyboardButton(
+            tr(ADMIN_TELEGRAM_ID, "disable_web_panel" if WEB_PANEL_ENABLED else "enable_web_panel"),
+            callback_data='settings_web_panel',
         )],
         [InlineKeyboardButton("💾 Backup & Restore", callback_data='settings_backup_restore')],
         [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
@@ -1304,7 +1319,7 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
-    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, HIDE_SUBSCRIPTION_PORT
+    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED
     global renewal_month_options
     load_assignments()
     language_store.load()
@@ -1323,6 +1338,9 @@ def reload_restored_state() -> None:
     HIDE_SUBSCRIPTION_PORT = str(
         restored_settings.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
     ).strip().lower() in {"1", "true", "yes", "on"}
+    WEB_PANEL_ENABLED = str(restored_settings.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
+        "1", "true", "yes", "on"
+    }
     renewal_month_options = parse_renewal_month_options(RENEWAL_MONTH_OPTIONS)
 
 @rate_limited(admin_only=True)
@@ -1625,6 +1643,12 @@ def subscription_keyboard(user_id: int, client_id: int, web_panel_url: str | Non
     return InlineKeyboardMarkup(keyboard)
 
 
+def web_panel_url_for(username: str) -> str | None:
+    if not WEB_PANEL_ENABLED or not WEB_PANEL_BASE_URL:
+        return None
+    return build_web_panel_url(WEB_PANEL_BASE_URL, username, BOT_DISPLAY_NAME)
+
+
 def renewal_reminder_keyboard(user_id: int, reminders: list[dict]) -> InlineKeyboardMarkup:
     if len(reminders) == 1:
         reminder = reminders[0]
@@ -1687,10 +1711,7 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
         clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
         username = clients[0].get("name", "Unknown") if clients else "Unknown"
-        web_panel_url = (
-            build_web_panel_url(WEB_PANEL_BASE_URL, username, BOT_DISPLAY_NAME)
-            if WEB_PANEL_BASE_URL else None
-        )
+        web_panel_url = web_panel_url_for(username)
 
         await update.message.reply_text(usage_msg, reply_markup=subscription_keyboard(tg_id, client_id, web_panel_url))
     else:
@@ -2611,6 +2632,7 @@ async def delete_user_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @rate_limited(admin_only=False)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED
     query = update.callback_query
     await localized_query_answer(query)
     user_id = query.from_user.id
@@ -2702,11 +2724,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton(tr(user_id, "cancel"), callback_data="settings_connection_guides")],
                 ]),
             )
+        elif data == 'settings_web_panel':
+            if user_id != ADMIN_TELEGRAM_ID:
+                await localized_query_answer(query, "❌ Admin only", show_alert=True)
+                return
+            if WEB_PANEL_ENABLED:
+                WEB_PANEL_ENABLED = False
+                save_runtime_setting("WEB_PANEL_ENABLED", "false", RUNTIME_SETTINGS_FILE)
+                await query.edit_message_text(
+                    build_settings_menu_text(),
+                    reply_markup=build_settings_menu_keyboard(),
+                )
+                await localized_query_answer(query, tr(user_id, "web_panel_disabled_notice"), show_alert=True)
+            else:
+                await query.edit_message_text(
+                    tr(user_id, "web_panel_warning"),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            tr(user_id, "confirm_enable_web_panel"),
+                            callback_data='settings_web_panel_confirm',
+                        )],
+                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='admin_settings')],
+                    ]),
+                )
+        elif data == 'settings_web_panel_confirm':
+            if user_id != ADMIN_TELEGRAM_ID:
+                await localized_query_answer(query, "❌ Admin only", show_alert=True)
+                return
+            WEB_PANEL_ENABLED = True
+            save_runtime_setting("WEB_PANEL_ENABLED", "true", RUNTIME_SETTINGS_FILE)
+            await query.edit_message_text(
+                build_settings_menu_text(),
+                reply_markup=build_settings_menu_keyboard(),
+            )
+            notice_key = "web_panel_enabled_notice" if WEB_PANEL_BASE_URL else "web_panel_pending_notice"
+            await localized_query_answer(query, tr(user_id, notice_key), show_alert=True)
         elif data == 'settings_subscription_port':
             if user_id != ADMIN_TELEGRAM_ID:
                 await localized_query_answer(query, "❌ Admin only", show_alert=True)
                 return
-            global HIDE_SUBSCRIPTION_PORT
             if HIDE_SUBSCRIPTION_PORT:
                 HIDE_SUBSCRIPTION_PORT = False
                 save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", RUNTIME_SETTINGS_FILE)
@@ -2907,10 +2963,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data_obj = await api_client.get('apiv2/clients', {'id': client_id})
                 clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
                 username = clients[0].get("name", "Unknown") if clients else "Unknown"
-                web_panel_url = (
-                    build_web_panel_url(WEB_PANEL_BASE_URL, username, BOT_DISPLAY_NAME)
-                    if WEB_PANEL_BASE_URL else None
-                )
+                web_panel_url = web_panel_url_for(username)
 
                 new_reply_markup = subscription_keyboard(user_id, client_id, web_panel_url)
 
@@ -2938,10 +2991,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
                         clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
                         username = clients[0].get("name", "Unknown") if clients else "Unknown"
-                        web_panel_url = (
-                            build_web_panel_url(WEB_PANEL_BASE_URL, username, BOT_DISPLAY_NAME)
-                            if WEB_PANEL_BASE_URL else None
-                        )
+                        web_panel_url = web_panel_url_for(username)
 
                         await query.edit_message_text(
                             usage_msg,
@@ -3029,10 +3079,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data_obj = await api_client.get('apiv2/clients', {'id': client_id})
             clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
             username = clients[0].get("name", "Unknown") if clients else "Unknown"
-            web_panel_url = (
-                build_web_panel_url(WEB_PANEL_BASE_URL, username, BOT_DISPLAY_NAME)
-                if WEB_PANEL_BASE_URL else None
-            )
+            web_panel_url = web_panel_url_for(username)
 
             await query.edit_message_text(
                 usage_msg,

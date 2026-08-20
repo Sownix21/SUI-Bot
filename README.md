@@ -155,6 +155,8 @@ The dashboard port must differ from ports `80`, `443`, and the S-UI subscription
 
 The dashboard title follows the current **message display name** configured in Telegram Settings whenever a user opens a newly generated Web Panel link. This still does not change the bot's BotFather profile name or `@username`. A previously sent Telegram message may contain the earlier title; reopening the bot menu generates a fresh link.
 
+The administrator must separately enable **Settings → Enable Web Panel** in Telegram. A localized warning explains that this toggle does not install nginx, certificates, or firewall rules and that `sudo sui-bot web-panel` must be completed on Linux. The preference may be enabled before installation, but the user button remains hidden until both the toggle is enabled and the Linux installer has configured a valid panel URL. Removing the panel from Linux also disables the Telegram toggle.
+
 ## Backup and restore bot state
 
 Only the configured Telegram administrator can create or restore a state backup.

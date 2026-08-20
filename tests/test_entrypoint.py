@@ -38,6 +38,7 @@ def test_reminder_keyboard_targets_each_expiring_subscription(tmp_path) -> None:
         "BOT_LOG_FILE": "",
     })
     script = """
+import sui_bot.bot as bot
 from sui_bot.bot import reminder_remaining_text, renewal_reminder_keyboard, subscription_keyboard
 from sui_bot.outgoing_localization import localize_inline_markup
 
@@ -56,6 +57,11 @@ assert "\ue100" not in localized.inline_keyboard[0][0].text
 assert reminder_remaining_text("en", 1) == "⏳ 24 hours remaining"
 without_web_panel = subscription_keyboard(10, 7, None)
 assert not any(button.url for row in without_web_panel.inline_keyboard for button in row)
+bot.WEB_PANEL_BASE_URL = "https://panel.example.com:2083/private-route"
+bot.WEB_PANEL_ENABLED = False
+assert bot.web_panel_url_for("alice") is None
+bot.WEB_PANEL_ENABLED = True
+assert bot.web_panel_url_for("alice").startswith("https://panel.example.com:2083/private-route/alice")
 """
     result = subprocess.run(  # noqa: S603 - current test interpreter and fixed test program
         [sys.executable, "-c", script],

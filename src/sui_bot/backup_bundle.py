@@ -33,6 +33,7 @@ RUNTIME_SETTING_KEYS = frozenset({
     "PAYMENT_CARD_HOLDER",
     "BOT_DISPLAY_NAME",
     "HIDE_SUBSCRIPTION_PORT",
+    "WEB_PANEL_ENABLED",
 })
 LANGUAGE_CODES = frozenset({"en", "fa", "ru", "zh"})
 
@@ -81,6 +82,9 @@ def _validate_state_entry(key: str, value: Any) -> None:
         hide_port = value.get("HIDE_SUBSCRIPTION_PORT")
         if hide_port is not None and str(hide_port).strip().lower() not in {"true", "false"}:
             raise ValueError("runtime settings contain an invalid subscription-port setting")
+        web_panel_enabled = value.get("WEB_PANEL_ENABLED")
+        if web_panel_enabled is not None and str(web_panel_enabled).strip().lower() not in {"true", "false"}:
+            raise ValueError("runtime settings contain an invalid web-panel setting")
     elif key == "connection_guides":
         validate_guide_data(value)
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):
