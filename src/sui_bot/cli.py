@@ -435,13 +435,51 @@ def _web_template_path() -> Path:
 
 
 def web_panel_status() -> str:
+    try:
+        base_url = load_environment().get("WEB_PANEL_BASE_URL", "")
+    except FileNotFoundError:
+        base_url = ""
     if NGINX_CONFIG.is_file() and WEB_PANEL_FILE.is_file():
-        try:
-            base_url = load_environment().get("WEB_PANEL_BASE_URL", "")
-        except FileNotFoundError:
-            base_url = ""
         return f"installed ({base_url or 'URL not configured'})"
+    if base_url:
+        return f"existing panel link configured ({base_url})"
     return "not installed"
+
+
+def configure_existing_web_panel_link() -> None:
+    """Point the Telegram button at an owner-managed panel without touching its server configuration."""
+    require_root("Configuring an existing web-panel link")
+    values = load_environment()
+    current = values.get("WEB_PANEL_BASE_URL", "")
+    print("\nButton-only mode for an existing web panel.")
+    print("This does not install, inspect, modify, reload, or remove nginx and certificates.")
+    print("Enter the base URL before the S-UI username, including its dedicated HTTPS port and optional path.")
+    example = "https://panel.example.com:2083/private-route"
+    prompt = f"Existing Web Panel base URL [{current}]: " if current else f"Existing Web Panel base URL (example: {example}): "
+    base_url = validate_optional_https_url(input(prompt).strip() or current, "WEB_PANEL_BASE_URL")
+    if not base_url:
+        raise ValueError("enter the existing Web Panel base URL")
+    parsed = urlsplit(base_url)
+    if parsed.port is None:
+        raise ValueError("existing Web Panel URL must include its dedicated HTTPS port, such as :2083")
+    cache_path = configured_data_path(values, "SUB_CACHE_FILE", "subscription_cache.json")
+    metadata = subscription_metadata(cache_path)
+    validate_dashboard_port(parsed.port, metadata["port"])
+
+    old_environment = dict(values)
+    values["WEB_PANEL_BASE_URL"] = base_url
+    try:
+        write_environment(values)
+        if systemctl("restart") != 0:
+            raise RuntimeError("SUI Bot failed to restart with the existing web-panel link")
+    except BaseException:
+        write_environment(old_environment)
+        systemctl("restart")
+        raise
+
+    print("\nExisting Web Panel link configured successfully; nginx and certificates were untouched.")
+    print(f"User URL format: {base_url}/<S-UI-username>")
+    print("Enable the button from Telegram: Admin Settings -> Enable Web Panel.")
 
 
 def configure_web_panel() -> None:
@@ -502,7 +540,10 @@ def configure_web_panel() -> None:
         managed_text = NGINX_CONFIG.read_text(encoding="utf-8", errors="replace")
         managed_allowance = len(re.findall(rf"\bserver_name\s+{re.escape(domain)}(?:\s|;)", managed_text))
     if len(domain_blocks) > managed_allowance:
-        raise RuntimeError(f"nginx already contains another server block for {domain}; use a dedicated unused domain")
+        raise RuntimeError(
+            f"nginx already contains another server block for {domain}. "
+            "If it is your existing working panel, use `sudo sui-bot web-panel-link` to configure only the bot button."
+        )
     listen_pattern = rf"\blisten\s+(?:\[::\]:)?{dashboard_port}(?:\s|;)"
     port_blocks = re.findall(listen_pattern, dump.stdout + dump.stderr)
     managed_port_allowance = 0
@@ -759,8 +800,9 @@ def interactive_menu() -> int:
         "10": update_bot,
         "11": data_diagnostics,
         "12": configure_web_panel,
-        "13": remove_web_panel,
-        "14": uninstall_bot,
+        "13": configure_existing_web_panel_link,
+        "14": remove_web_panel,
+        "15": uninstall_bot,
     }
     while True:
         print("\n╭──────────────────────────────────────╮")
@@ -780,8 +822,9 @@ def interactive_menu() -> int:
         print(" 10. Update SUI Bot from GitHub")
         print(" 11. Diagnose assignments and data")
         print(" 12. Install/update web panel and nginx proxy")
-        print(" 13. Remove web panel and nginx proxy")
-        print(" 14. Completely uninstall SUI Bot")
+        print(" 13. Use existing web panel (button only; do not modify nginx)")
+        print(" 14. Remove SUI Bot-managed web panel and nginx proxy")
+        print(" 15. Completely uninstall SUI Bot")
         print("  0. Exit")
         choice = input("\nSelect an option: ").strip()
         if choice == "0":
@@ -811,6 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="Validate assignment and runtime data files")
     subparsers.add_parser("update", help="Download and install the latest version from GitHub")
     subparsers.add_parser("web-panel", help="Install or update the optional HTTPS web panel")
+    subparsers.add_parser("web-panel-link", help="Use an existing web panel for the Telegram button only")
     subparsers.add_parser("remove-web-panel", help="Remove the optional web panel and managed nginx site")
     subparsers.add_parser("uninstall", help="Completely uninstall SUI Bot and its managed data")
     return parser
@@ -840,6 +884,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "web-panel":
             configure_web_panel()
+            return 0
+        if args.command == "web-panel-link":
+            configure_existing_web_panel_link()
             return 0
         if args.command == "remove-web-panel":
             remove_web_panel()

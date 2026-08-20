@@ -68,6 +68,26 @@ def test_atomic_environment_write_is_reloadable(tmp_path: Path, monkeypatch: pyt
         assert target.stat().st_mode & 0o777 == 0o600
 
 
+def test_existing_web_panel_link_changes_only_bot_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = valid_environment()
+    written: dict[str, str] = {}
+    monkeypatch.setattr(cli, "require_root", lambda _action: None)
+    monkeypatch.setattr(cli, "load_environment", lambda: dict(values))
+    monkeypatch.setattr(cli, "write_environment", lambda new_values: written.update(new_values))
+    monkeypatch.setattr(cli, "configured_data_path", lambda *_args: Path("subscription_cache.json"))
+    monkeypatch.setattr(cli, "subscription_metadata", lambda _path: {"port": 2096})
+    monkeypatch.setattr(cli, "systemctl", lambda action: 0 if action == "restart" else 1)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "https://existing.example.com:2083/private-route")
+    monkeypatch.setattr(cli, "_install_web_packages", lambda: pytest.fail("must not install packages"))
+    monkeypatch.setattr(cli, "_nginx_test_and_reload", lambda: pytest.fail("must not touch nginx"))
+
+    cli.configure_existing_web_panel_link()
+
+    assert written["WEB_PANEL_BASE_URL"] == "https://existing.example.com:2083/private-route"
+    assert "SUBSCRIPTION_PUBLIC_ORIGIN" not in written
+    assert "HIDE_SUBSCRIPTION_PORT" not in written
+
+
 def test_uninstall_removes_only_managed_components(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     install_dir = tmp_path / "opt" / "sui-bot"
     config_dir = tmp_path / "etc" / "sui-bot"

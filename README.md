@@ -131,6 +131,7 @@ sui-bot validate
 sudo sui-bot doctor
 sudo sui-bot update
 sudo sui-bot web-panel
+sudo sui-bot web-panel-link
 sudo sui-bot remove-web-panel
 sudo sui-bot uninstall
 ```
@@ -155,7 +156,9 @@ The dashboard port must differ from ports `80`, `443`, and the S-UI subscription
 
 The dashboard title follows the current **message display name** configured in Telegram Settings whenever a user opens a newly generated Web Panel link. This still does not change the bot's BotFather profile name or `@username`. A previously sent Telegram message may contain the earlier title; reopening the bot menu generates a fresh link.
 
-The administrator must separately enable **Settings → Enable Web Panel** in Telegram. A localized warning explains that this toggle does not install nginx, certificates, or firewall rules and that `sudo sui-bot web-panel` must be completed on Linux. The preference may be enabled before installation, but the user button remains hidden until both the toggle is enabled and the Linux installer has configured a valid panel URL. Removing the panel from Linux also disables the Telegram toggle.
+The administrator must separately enable **Settings → Enable Web Panel** in Telegram. A localized warning explains that this toggle does not install nginx, certificates, or firewall rules and that either managed setup (`sudo sui-bot web-panel`) or existing-panel link setup (`sudo sui-bot web-panel-link`) must be completed on Linux. The preference may be enabled beforehand, but the user button remains hidden until both the toggle and a valid panel URL are present. Removing the managed panel from Linux also disables the Telegram toggle.
+
+If you already have a working custom nginx dashboard, do **not** run the managed installer and do not replace its domain or configuration. Choose **Use existing web panel (button only)** from `sudo sui-bot`, or run `sudo sui-bot web-panel-link`, then enter the existing base URL before the username, for example `https://panel.example.com:2083/private-route`. This mode updates only `WEB_PANEL_BASE_URL` and restarts SUI Bot; it does not inspect or modify nginx, certificates, firewall rules, subscription origins, or port-removal settings.
 
 ## Backup and restore bot state
 
