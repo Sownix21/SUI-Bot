@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SUI Bot Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='28' fill='%237c5cff'/><text x='50' y='67' text-anchor='middle' font-size='52' fill='white'>S</text></svg>">
+  <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/qrcode_js@1.0.0/qrcode.min.js"></script>
+  <style>
+    :root{--bg:#030408;--card:rgba(15,21,36,.72);--accent:#22d3ee;--purple:#7c5cff;--text:#f1f5f9;--dim:#94a3b8;--border:rgba(255,255,255,.09);--danger:#f87171}
+    *{box-sizing:border-box;font-family:Vazirmatn,"Apple Color Emoji","Segoe UI Emoji",system-ui,sans-serif}
+    body{background:radial-gradient(at 0 0,rgba(124,92,255,.14),transparent 50%),radial-gradient(at 100% 100%,rgba(34,211,238,.12),transparent 50%),var(--bg);color:var(--text);margin:0;padding:20px;min-height:100vh;display:flex;justify-content:center}
+    button{font:inherit}.container{width:100%;max-width:1000px;animation:enter .6s cubic-bezier(.16,1,.3,1)}@keyframes enter{from{opacity:0;transform:translateY(18px)}}
+    .top{display:flex;justify-content:space-between;align-items:center;max-width:600px;margin:0 auto 20px}.lang{background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:12px;cursor:pointer}.lang.active{background:var(--accent);color:#001018}
+    .hero{background:var(--card);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:32px;padding:30px;text-align:center;box-shadow:0 25px 50px -12px #0008;margin:0 auto 30px;max-width:600px}.logo{width:60px;height:60px;background:linear-gradient(135deg,var(--accent),var(--purple));border-radius:20px;margin:0 auto 15px;display:grid;place-items:center;font-size:28px;font-weight:800}.bar{height:10px;background:#ffffff08;border-radius:8px;overflow:hidden;border:1px solid var(--border);margin:20px 0}.fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--purple));width:0;transition:width 1.5s}
+    .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.stat{background:#ffffff06;padding:12px;border-radius:20px;border:1px solid var(--border)}.stat small{display:block;color:var(--dim);font-size:11px}.stat b{font-size:14px}
+    .grid{display:grid;grid-template-columns:1.2fr 1fr;gap:25px;align-items:start}.heading{font-size:15px;font-weight:700;margin-bottom:15px;color:var(--dim);display:flex;align-items:center;gap:10px}.heading:after{content:"";flex:1;height:1px;background:var(--border)}
+    .card,.config{background:var(--card);border:1px solid var(--border);transition:.3s;border-radius:22px;margin-bottom:10px}.card:hover,.config:hover{transform:translateY(-4px);border-color:var(--accent)}.card{padding:17px;display:flex;align-items:center;gap:14px}.icon{width:44px;height:44px;border-radius:14px;background:#ffffff08;display:grid;place-items:center;font-size:20px;flex:none}.details{flex:1;min-width:0}.details b{display:block;font-size:13px}.details p{margin:2px 0 0;color:var(--dim);font-size:10px;line-height:1.5}.actions{display:flex;gap:6px}.action{width:36px;height:36px;border-radius:11px;border:1px solid var(--border);background:#ffffff0a;color:var(--text);cursor:pointer}.action:hover{background:var(--accent);color:#001018}.config{padding:13px 15px;display:flex;align-items:center;gap:12px}.config-text{flex:1;min-width:0;text-align:left;direction:ltr}.config-text b{font-size:13px;word-break:break-word}.config-text span{display:block;font-size:9px;color:var(--accent);font-weight:700}
+    .modal{display:none;position:fixed;inset:0;background:#000e;align-items:center;justify-content:center;z-index:10;padding:20px}.modal.open{display:flex}.modal-box{background:#101624;border:1px solid var(--border);padding:30px;border-radius:30px;text-align:center}.qr{background:white;padding:15px;border-radius:18px}.loader{position:fixed;inset:0;background:var(--bg);display:grid;place-items:center;z-index:20}.spinner{width:34px;height:34px;border:3px solid transparent;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:var(--danger);text-align:center;margin-top:25vh}
+    @media(max-width:850px){.grid{grid-template-columns:1fr}.container{max-width:520px}}[dir=ltr] .details{text-align:left}
+  </style>
+</head>
+<body>
+<div class="loader" id="loader"><div class="spinner"></div></div>
+<main class="container" id="main" hidden>
+  <nav class="top"><div><button class="lang" id="en">EN</button><button class="lang active" id="fa">فا</button><button class="lang" id="ru">RU</button><button class="lang" id="zh">中文</button></div><strong id="panel-title"></strong></nav>
+  <section class="hero"><div class="logo" id="logo">S</div><h2 id="username">Username</h2><div class="bar"><div class="fill" id="fill"></div></div><div class="stats">
+    <div class="stat"><small id="total-label"></small><b id="total">—</b></div><div class="stat"><small id="used-label"></small><b id="used">—</b></div>
+    <div class="stat"><small id="remaining-label"></small><b id="remaining">—</b></div><div class="stat"><small id="time-label"></small><b id="time">—</b></div>
+  </div></section>
+  <div class="grid"><section><div class="heading" id="subscriptions-label"></div><div id="apps"></div></section><section><div class="heading" id="configs-label"></div><div id="configs"></div></section></div>
+</main>
+<div class="modal" id="modal"><div class="modal-box"><h3 id="qr-title"></h3><div class="qr"><div id="qr"></div></div></div></div>
+<script>
+"use strict";
+const SETTINGS=__SUI_BOT_WEB_CONFIG__;
+const TEXT={
+ fa:{total:"حجم کل",used:"مصرف شده",remaining:"حجم باقی‌مانده",time:"زمان باقی‌مانده",subscriptions:"اشتراک‌ها",configs:"کانفیگ‌ها",copied:"کپی شد",unlimited:"نامحدود",never:"دائمی",days:"روز",hours:"ساعت",expired:"منقضی شده",notFound:"کاربر پیدا نشد",qr:"اسکن کد QR",apps:[
+  ["🚀","V2Ray / Universal","پایداری بالا | اندروید، iOS، ویندوز و مک"],["💎","Sing-box JSON","مسیریابی هوشمند | همه سیستم‌عامل‌ها (پیشنهادی)"],["🐱","Clash Meta","مدیریت ترافیک | ویندوز، مک و iOS"],["🔌","Sing-box One-Tap","ورود خودکار در Sing-box"]]},
+ en:{total:"Total quota",used:"Used data",remaining:"Remaining",time:"Time left",subscriptions:"Subscriptions",configs:"Configs",copied:"Copied",unlimited:"Unlimited",never:"Never",days:"days",hours:"hours",expired:"Expired",notFound:"User not found",qr:"Scan QR code",apps:[
+  ["🚀","V2Ray / Universal","High stability | Android, iOS, Windows and macOS"],["💎","Sing-box JSON","Smart routing | All platforms (recommended)"],["🐱","Clash Meta","Traffic rules | Windows, macOS and iOS"],["🔌","Sing-box One-Tap","Automatic Sing-box import"]]},
+ ru:{total:"Общий объём",used:"Использовано",remaining:"Осталось",time:"Срок",subscriptions:"Подписки",configs:"Конфигурации",copied:"Скопировано",unlimited:"Без ограничений",never:"Бессрочно",days:"дн.",hours:"ч.",expired:"Истекла",notFound:"Пользователь не найден",qr:"Сканировать QR-код",apps:[
+  ["🚀","V2Ray / Universal","Высокая стабильность | Android, iOS, Windows и macOS"],["💎","Sing-box JSON","Умная маршрутизация | Все платформы (рекомендуется)"],["🐱","Clash Meta","Правила трафика | Windows, macOS и iOS"],["🔌","Sing-box One-Tap","Автоматический импорт в Sing-box"]]},
+ zh:{total:"总流量",used:"已使用",remaining:"剩余流量",time:"剩余时间",subscriptions:"订阅",configs:"配置",copied:"已复制",unlimited:"无限制",never:"永久",days:"天",hours:"小时",expired:"已过期",notFound:"未找到用户",qr:"扫描二维码",apps:[
+  ["🚀","V2Ray / Universal","高稳定性 | Android、iOS、Windows 和 macOS"],["💎","Sing-box JSON","智能路由 | 所有平台（推荐）"],["🐱","Clash Meta","流量规则 | Windows、macOS 和 iOS"],["🔌","Sing-box One-Tap","自动导入 Sing-box"]]}
+};
+let language="fa";const requestedTitle=new URLSearchParams(location.search).get("title");const panelTitle=(requestedTitle&&requestedTitle.trim().slice(0,80))||SETTINGS.title;const state={name:"",username:"",stats:{},links:[]};
+const byId=id=>document.getElementById(id);const element=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node};
+function decodeBase64(value){try{const binary=atob(value.replace(/[^A-Za-z0-9+/=]/g,""));return new TextDecoder().decode(Uint8Array.from(binary,c=>c.charCodeAt(0)))}catch{return ""}}
+function size(bytes){bytes=Number(bytes)||0;if(!bytes)return "∞";const units=["B","KB","MB","GB","TB"];const index=Math.min(units.length-1,Math.floor(Math.log(bytes)/Math.log(1024)));return `${(bytes/1024**index).toFixed(2)} ${units[index]}`}
+function timeLeft(timestamp,t){timestamp=Number(timestamp)||0;if(!timestamp)return t.never;const difference=timestamp-Math.floor(Date.now()/1000);if(difference<=0)return t.expired;const days=Math.floor(difference/86400),hours=Math.floor(difference%86400/3600);return days?`${days} ${t.days} ${hours} ${t.hours}`:`${hours} ${t.hours}`}
+async function copy(value){await navigator.clipboard.writeText(value);alert(TEXT[language].copied)}
+function qr(value){byId("qr").replaceChildren();byId("qr-title").textContent=TEXT[language].qr;byId("modal").classList.add("open");new QRCode(byId("qr"),{text:value,width:220,height:220})}
+function actionButton(label,handler){const button=element("button","action",label);button.type="button";button.addEventListener("click",handler);return button}
+function render(){const t=TEXT[language],stats=state.stats,used=(Number(stats.upload)||0)+(Number(stats.download)||0),total=Number(stats.total)||0;
+ document.documentElement.lang=language;document.documentElement.dir=language==="fa"?"rtl":"ltr";["en","fa","ru","zh"].forEach(code=>byId(code).classList.toggle("active",language===code));
+ byId("panel-title").textContent=panelTitle;document.title=`${panelTitle} Dashboard`;byId("logo").textContent=(panelTitle.trim()[0]||"S").toUpperCase();byId("username").textContent=state.name;
+ [["total-label",t.total],["used-label",t.used],["remaining-label",t.remaining],["time-label",t.time],["subscriptions-label",t.subscriptions],["configs-label",t.configs]].forEach(([id,value])=>byId(id).textContent=value);
+ byId("used").textContent=size(used);byId("total").textContent=total?size(total):t.unlimited;byId("remaining").textContent=total?size(Math.max(0,total-used)):"∞";byId("time").textContent=timeLeft(stats.expire,t);byId("fill").style.width=total?`${Math.min(100,used/total*100)}%`:"100%";
+ const base=`${location.origin}${SETTINGS.subscriptionPrefix}/${encodeURIComponent(state.username)}`;const appLinks=[base,`${base}?format=json`,`${base}?format=clash`,`sing-box://import-remote-profile?url=${encodeURIComponent(base+"?format=json")}#${encodeURIComponent(state.name)}`];byId("apps").replaceChildren();
+ t.apps.forEach((app,index)=>{const card=element("article","card"),icon=element("div","icon",app[0]),details=element("div","details"),actions=element("div","actions");details.append(element("b",null,app[1]),element("p",null,app[2]));if(index<3)actions.append(actionButton("📄",()=>copy(appLinks[index])));actions.append(actionButton("QR",()=>qr(appLinks[index])));card.append(icon,details,actions);byId("apps").append(card)});
+ byId("configs").replaceChildren();state.links.forEach(link=>{const card=element("article","config"),details=element("div","config-text"),actions=element("div","actions"),fragment=link.includes("#")?link.split("#").pop():"Config";let name="Config";try{name=decodeURIComponent(fragment)}catch{}details.append(element("b",null,name),element("span",null,(link.split("://")[0]||"CONFIG").toUpperCase()));actions.append(actionButton("📄",()=>copy(link)),actionButton("QR",()=>qr(link)));card.append(details,actions);byId("configs").append(card)})}
+async function init(){const parts=location.pathname.split("/").filter(Boolean);state.username=parts.at(-1)||"";if(!state.username){throw new Error("missing user")};const response=await fetch(`${SETTINGS.apiPrefix}/${encodeURIComponent(state.username)}`,{credentials:"omit"});if(!response.ok)throw new Error("not found");const info=response.headers.get("subscription-userinfo"),title=response.headers.get("profile-title"),body=await response.text();state.name=title||state.username;state.stats=info?Object.fromEntries(info.split(";").map(item=>item.trim().split("="))):{};state.links=decodeBase64(body).split("\n").map(item=>item.trim()).filter(item=>/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(item));render();byId("loader").remove();byId("main").hidden=false}
+["en","fa","ru","zh"].forEach(code=>byId(code).addEventListener("click",()=>{language=code;render()}));byId("modal").addEventListener("click",()=>byId("modal").classList.remove("open"));init().catch(()=>{byId("loader").innerHTML="";byId("loader").append(element("p","error",TEXT[language].notFound))});
+</script>
+</body>
+</html>

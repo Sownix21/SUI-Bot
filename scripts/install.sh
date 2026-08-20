@@ -42,7 +42,7 @@ if [[ ${SOURCE_DIR} != ${INSTALL_DIR} ]]; then
   # artifacts must never become part of the system installation.
   rm -rf "${INSTALL_DIR}/src" "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/scripts"
   cp -a "${SOURCE_DIR}/src" "${SOURCE_DIR}/deploy" "${SOURCE_DIR}/scripts" "${INSTALL_DIR}/"
-  for release_file in pyproject.toml README.md LICENSE .env.example; do
+  for release_file in pyproject.toml README.md README.fa.md LICENSE .env.example; do
     if [[ -f ${SOURCE_DIR}/${release_file} ]]; then
       cp -a "${SOURCE_DIR}/${release_file}" "${INSTALL_DIR}/${release_file}"
     fi

@@ -7,16 +7,30 @@ import getpass
 import json
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
-from .config import validate_display_name
+from .config import validate_display_name, validate_optional_https_origin, validate_optional_https_url
+from .runtime_settings import load_runtime_settings, remove_runtime_setting, save_runtime_setting
 from .security import validate_service_url
+from .web_panel import (
+    build_acme_nginx_configuration,
+    build_nginx_configuration,
+    render_web_panel_html,
+    subscription_metadata,
+    validate_dashboard_port,
+    validate_domain,
+    validate_route,
+    validate_upstream_host,
+)
 
 SERVICE_NAME = "sui-bot.service"
 DEFAULT_ENV_FILE = Path("/etc/sui-bot/sui-bot.env")
@@ -25,6 +39,9 @@ INSTALL_DIR = Path("/opt/sui-bot")
 CONFIG_DIR = Path("/etc/sui-bot")
 STATE_DIR = Path("/var/lib/sui-bot")
 COMMAND_FILE = Path("/usr/local/bin/sui-bot")
+WEB_ROOT = Path("/var/www/sui-bot")
+WEB_PANEL_FILE = WEB_ROOT / "index.html"
+NGINX_CONFIG = Path("/etc/nginx/conf.d/sui-bot-web-panel.conf")
 SERVICE_USER = "sui-bot"
 DEFAULT_REPOSITORY = "https://github.com/Sownix21/SUI-Bot.git"
 SECRET_KEYS = {"BOT_TOKEN", "SUI_TOKEN"}
@@ -48,6 +65,8 @@ EDITABLE_FIELDS = [
     ("PAYMENT_CARD_HOLDER", "Payment card holder"),
     ("BOT_DISPLAY_NAME", "Message display name"),
     ("HIDE_SUBSCRIPTION_PORT", "Hide subscription-link port"),
+    ("WEB_PANEL_BASE_URL", "Web-panel base URL"),
+    ("SUBSCRIPTION_PUBLIC_ORIGIN", "Public subscription origin"),
 ]
 
 
@@ -192,6 +211,13 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_display_name(values["BOT_DISPLAY_NAME"])
         except RuntimeError as exc:
             errors.append(str(exc))
+    for url_key in ("WEB_PANEL_BASE_URL", "SUBSCRIPTION_PUBLIC_ORIGIN"):
+        if values.get(url_key):
+            try:
+                validator = validate_optional_https_origin if url_key == "SUBSCRIPTION_PUBLIC_ORIGIN" else validate_optional_https_url
+                validator(values[url_key], url_key)
+            except RuntimeError as exc:
+                errors.append(str(exc))
     state_root = STATE_DIR.resolve()
     for key in ("BACKUP_DIR", "ASSIGNMENTS_FILE", "METRICS_FILE", "SUB_CACHE_FILE"):
         if not values.get(key, "").strip():
@@ -294,6 +320,7 @@ def data_diagnostics() -> bool:
         ("Inbound cache", STATE_DIR / "inbounds_cache.json"),
         ("Runtime settings", STATE_DIR / "runtime_settings.json"),
         ("Expiry state", STATE_DIR / "expired_notifications.json"),
+        ("Connection guides", STATE_DIR / "connection_guides.json"),
     ]
     print(f"\nSUI Bot state directory: {STATE_DIR}")
     print(f"Exists: {STATE_DIR.exists()} | readable: {os.access(STATE_DIR, os.R_OK)} | writable: {os.access(STATE_DIR, os.W_OK)}")
@@ -337,6 +364,305 @@ def data_diagnostics() -> bool:
     return valid
 
 
+def _atomic_text_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
+def _install_web_packages() -> None:
+    if shutil.which("nginx") and shutil.which("certbot"):
+        return
+    print("nginx and Certbot are required for automatic HTTPS setup.")
+    if input("Install the missing system packages now? [Y/n]: ").strip().lower() in {"n", "no"}:
+        raise RuntimeError("install nginx and certbot, then run this option again")
+    if shutil.which("apt-get"):
+        apt = require_command("apt-get")
+        subprocess.run([apt, "update"], check=True)  # noqa: S603 - fixed package manager arguments
+        subprocess.run([apt, "install", "-y", "nginx", "certbot"], check=True)  # noqa: S603
+    elif shutil.which("dnf"):
+        dnf = require_command("dnf")
+        subprocess.run([dnf, "install", "-y", "nginx", "certbot"], check=True)  # noqa: S603
+    elif shutil.which("yum"):
+        yum = require_command("yum")
+        subprocess.run([yum, "install", "-y", "nginx", "certbot"], check=True)  # noqa: S603
+    else:
+        raise RuntimeError("automatic web-panel setup supports apt, dnf, or yum package managers")
+
+
+def _ensure_tcp_port_available(port: int) -> None:
+    """Reject a dashboard port already bound by a non-managed process."""
+    addresses = [(socket.AF_INET, ("0.0.0.0", port))]  # noqa: S104 - availability probe, never listens
+    if socket.has_ipv6:
+        addresses.append((socket.AF_INET6, ("::", port)))
+    for family, address in addresses:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            probe.bind(address)
+        except OSError as exc:
+            raise RuntimeError(
+                f"dashboard port {port} is already occupied; choose a different unused port"
+            ) from exc
+        finally:
+            probe.close()
+
+
+def _nginx_test_and_reload() -> None:
+    nginx = require_command("nginx")
+    subprocess.run([nginx, "-t"], check=True)  # noqa: S603 - fixed executable and arguments
+    systemctl_executable = require_command("systemctl")
+    subprocess.run([systemctl_executable, "enable", "--now", "nginx"], check=True)  # noqa: S603
+    subprocess.run([systemctl_executable, "reload", "nginx"], check=True)  # noqa: S603
+
+
+def _web_template_path() -> Path:
+    installed = INSTALL_DIR / "deploy" / "web-panel" / "index.html"
+    if installed.is_file():
+        return installed
+    development = Path(__file__).resolve().parents[2] / "deploy" / "web-panel" / "index.html"
+    if development.is_file():
+        return development
+    raise RuntimeError("web-panel HTML template is missing from this installation")
+
+
+def web_panel_status() -> str:
+    if NGINX_CONFIG.is_file() and WEB_PANEL_FILE.is_file():
+        try:
+            base_url = load_environment().get("WEB_PANEL_BASE_URL", "")
+        except FileNotFoundError:
+            base_url = ""
+        return f"installed ({base_url or 'URL not configured'})"
+    return "not installed"
+
+
+def configure_web_panel() -> None:
+    """Install a dedicated-domain HTTPS dashboard and clean subscription proxy."""
+    require_root("Configuring the SUI Bot web panel")
+    values = load_environment()
+    cache_path = configured_data_path(values, "SUB_CACHE_FILE", "subscription_cache.json")
+    metadata = subscription_metadata(cache_path)
+    print("\nThis setup requires:")
+    print("  - a dedicated domain whose DNS A/AAAA record points to this VPS")
+    print("  - inbound TCP ports 80 and 443")
+    print("  - S-UI listening on this same VPS")
+    print("It will create a separate nginx site and will not overwrite nginx's default site.")
+    if input("Continue? [y/N]: ").strip().lower() not in {"y", "yes"}:
+        print("Web-panel setup cancelled.")
+        return
+
+    existing_web_url = urlsplit(values.get("WEB_PANEL_BASE_URL", ""))
+    domain_default = existing_web_url.hostname or ""
+    domain_prompt = f"Public dashboard domain [{domain_default}]: " if domain_default else "Public dashboard domain: "
+    domain = validate_domain(input(domain_prompt).strip() or domain_default)
+    default_title = values.get("BOT_DISPLAY_NAME", "SUI Bot") or "SUI Bot"
+    title = input(f"Dashboard title [{default_title}]: ").strip() or default_title
+    if len(title) > 80 or any(character in title for character in "\r\n"):
+        raise ValueError("dashboard title must contain at most 80 characters on one line")
+    default_route = existing_web_url.path.strip("/") or secrets.token_urlsafe(12)
+    route = validate_route(input(f"Private dashboard route [{default_route}]: ").strip() or default_route)
+    default_dashboard_port = existing_web_url.port or 2083
+    dashboard_port = validate_dashboard_port(
+        input(f"Dedicated HTTPS dashboard port [{default_dashboard_port}]: ").strip() or default_dashboard_port,
+        metadata["port"],
+    )
+    print(
+        f"Dashboard port {dashboard_port} must be unused by other services and allowed through the VPS firewall."
+    )
+    upstream_host = validate_upstream_host(
+        input("Same-VPS S-UI subscription listener IP/host [127.0.0.1]: ").strip() or "127.0.0.1"
+    )
+    try:
+        with socket.create_connection((upstream_host.strip("[]"), int(metadata["port"])), timeout=5):
+            pass
+    except OSError as exc:
+        raise RuntimeError(
+            f"S-UI subscription listener is unreachable at {upstream_host}:{metadata['port']}"
+        ) from exc
+
+    _install_web_packages()
+    nginx = require_command("nginx")
+    existing_web_domain = urlsplit(values.get("WEB_PANEL_BASE_URL", "")).hostname
+    dump = subprocess.run(  # noqa: S603 - nginx configuration inspection
+        [nginx, "-T"], check=False, capture_output=True, text=True,
+    )
+    if dump.returncode != 0:
+        raise RuntimeError("existing nginx configuration is invalid; fix `nginx -t` errors before continuing")
+    domain_blocks = re.findall(rf"\bserver_name\s+{re.escape(domain)}(?:\s|;)", dump.stdout + dump.stderr)
+    managed_allowance = 0
+    if NGINX_CONFIG.exists() and existing_web_domain == domain:
+        managed_text = NGINX_CONFIG.read_text(encoding="utf-8", errors="replace")
+        managed_allowance = len(re.findall(rf"\bserver_name\s+{re.escape(domain)}(?:\s|;)", managed_text))
+    if len(domain_blocks) > managed_allowance:
+        raise RuntimeError(f"nginx already contains another server block for {domain}; use a dedicated unused domain")
+    listen_pattern = rf"\blisten\s+(?:\[::\]:)?{dashboard_port}(?:\s|;)"
+    port_blocks = re.findall(listen_pattern, dump.stdout + dump.stderr)
+    managed_port_allowance = 0
+    if NGINX_CONFIG.exists() and existing_web_domain == domain and existing_web_url.port == dashboard_port:
+        managed_port_allowance = len(re.findall(listen_pattern, managed_text))
+    if len(port_blocks) > managed_port_allowance:
+        raise RuntimeError(
+            f"nginx already uses dashboard port {dashboard_port}; choose a different unused port"
+        )
+    if managed_port_allowance == 0:
+        _ensure_tcp_port_available(dashboard_port)
+
+    certificate = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    certificate_key = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
+    old_config = NGINX_CONFIG.read_bytes() if NGINX_CONFIG.is_file() else None
+    old_html = WEB_PANEL_FILE.read_bytes() if WEB_PANEL_FILE.is_file() else None
+    old_environment = dict(values)
+    runtime_path = STATE_DIR / "runtime_settings.json"
+    old_runtime_settings = load_runtime_settings(str(runtime_path))
+    environment_written = False
+    runtime_written = False
+    try:
+        WEB_ROOT.mkdir(parents=True, exist_ok=True)
+        os.chmod(WEB_ROOT, 0o755)  # noqa: S103 - nginx must traverse the public static web root
+        (WEB_ROOT / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+        if not certificate.is_file() or not certificate_key.is_file():
+            email = input("Email for Let's Encrypt expiry notices: ").strip()
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                raise ValueError("enter a valid email address for Let's Encrypt")
+            _atomic_text_write(NGINX_CONFIG, build_acme_nginx_configuration(domain))
+            _nginx_test_and_reload()
+            certbot = require_command("certbot")
+            subprocess.run([  # noqa: S603 - validated domain/email and fixed Certbot mode
+                certbot, "certonly", "--webroot", "--webroot-path", str(WEB_ROOT),
+                "--domain", domain, "--email", email, "--agree-tos", "--non-interactive",
+            ], check=True)
+
+        template = _web_template_path().read_text(encoding="utf-8")
+        html = render_web_panel_html(
+            template,
+            title=title,
+            route=route,
+            subscription_prefix=metadata["prefix"],
+        )
+        config = build_nginx_configuration(
+            domain=domain,
+            route=route,
+            metadata=metadata,
+            certificate=str(certificate),
+            certificate_key=str(certificate_key),
+            upstream_host=upstream_host,
+            dashboard_port=dashboard_port,
+        )
+        _atomic_text_write(WEB_PANEL_FILE, html)
+        _atomic_text_write(NGINX_CONFIG, config)
+        _nginx_test_and_reload()
+
+        values["WEB_PANEL_BASE_URL"] = f"https://{domain}:{dashboard_port}/{route}"
+        values["SUBSCRIPTION_PUBLIC_ORIGIN"] = f"https://{domain}"
+        values["HIDE_SUBSCRIPTION_PORT"] = "true"
+        write_environment(values)
+        environment_written = True
+        save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", str(runtime_path))
+        runtime_written = True
+        if shutil.which("chown"):
+            shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
+        if systemctl("restart") != 0:
+            raise RuntimeError("SUI Bot failed to restart with the web-panel configuration")
+    except BaseException:
+        if old_config is None:
+            NGINX_CONFIG.unlink(missing_ok=True)
+        else:
+            NGINX_CONFIG.write_bytes(old_config)
+        if old_html is None:
+            WEB_PANEL_FILE.unlink(missing_ok=True)
+        else:
+            WEB_PANEL_FILE.write_bytes(old_html)
+        if environment_written:
+            write_environment(old_environment)
+        if runtime_written:
+            if "HIDE_SUBSCRIPTION_PORT" in old_runtime_settings:
+                save_runtime_setting(
+                    "HIDE_SUBSCRIPTION_PORT",
+                    str(old_runtime_settings["HIDE_SUBSCRIPTION_PORT"]),
+                    str(runtime_path),
+                )
+            else:
+                remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(runtime_path))
+            if shutil.which("chown"):
+                shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
+        try:
+            _nginx_test_and_reload()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if environment_written:
+            systemctl("restart")
+        raise
+
+    print("\nSUI Bot web panel enabled successfully.")
+    print(f"User URL format: https://{domain}:{dashboard_port}/{route}/<S-UI-username>")
+    print("Clean portless subscription URLs were enabled automatically.")
+
+
+def remove_web_panel(*, confirmed: bool = False) -> None:
+    require_root("Removing the SUI Bot web panel")
+    if not confirmed and input("Remove the SUI Bot nginx site and dashboard files? [y/N]: ").strip().lower() not in {"y", "yes"}:
+        print("Web-panel removal cancelled.")
+        return
+    values = load_environment()
+    runtime_path = STATE_DIR / "runtime_settings.json"
+    old_config = NGINX_CONFIG.read_bytes() if NGINX_CONFIG.is_file() else None
+    old_environment = dict(values)
+    old_runtime_settings = load_runtime_settings(str(runtime_path))
+    environment_written = False
+    runtime_written = False
+    try:
+        NGINX_CONFIG.unlink(missing_ok=True)
+        if shutil.which("nginx"):
+            _nginx_test_and_reload()
+        values["WEB_PANEL_BASE_URL"] = ""
+        values["SUBSCRIPTION_PUBLIC_ORIGIN"] = ""
+        values["HIDE_SUBSCRIPTION_PORT"] = "false"
+        write_environment(values)
+        environment_written = True
+        save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", str(runtime_path))
+        runtime_written = True
+        if shutil.which("chown"):
+            shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
+        if systemctl("restart") != 0:
+            raise RuntimeError("SUI Bot failed to restart after web-panel removal")
+    except BaseException:
+        if old_config is not None:
+            NGINX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            NGINX_CONFIG.write_bytes(old_config)
+            if shutil.which("nginx"):
+                try:
+                    _nginx_test_and_reload()
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        if environment_written:
+            write_environment(old_environment)
+        if runtime_written:
+            if "HIDE_SUBSCRIPTION_PORT" in old_runtime_settings:
+                save_runtime_setting(
+                    "HIDE_SUBSCRIPTION_PORT",
+                    str(old_runtime_settings["HIDE_SUBSCRIPTION_PORT"]),
+                    str(runtime_path),
+                )
+            else:
+                remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(runtime_path))
+            if shutil.which("chown"):
+                shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
+        if environment_written:
+            systemctl("restart")
+        raise
+    if WEB_ROOT.exists() and WEB_ROOT.resolve() == Path("/var/www/sui-bot"):
+        shutil.rmtree(WEB_ROOT)
+    print("SUI Bot web panel removed. Let's Encrypt certificates were retained for safety.")
+
+
 def update_bot(*, confirmed: bool = False) -> None:
     """Clone the latest GitHub revision and run its idempotent installer."""
     require_root("Updating SUI Bot")
@@ -371,6 +697,8 @@ def uninstall_bot(*, confirmed: bool = False) -> None:
         print(f"  - Service:       {SERVICE_FILE}")
         print(f"  - Command:       {COMMAND_FILE}")
         print(f"  - System user:   {SERVICE_USER}")
+        print(f"  - Web panel:     {WEB_ROOT} and {NGINX_CONFIG}")
+        print("  - Let's Encrypt certificates and shared nginx packages are retained")
         confirmation = input("\nType UNINSTALL SUI BOT to continue: ").strip()
         if confirmation != "UNINSTALL SUI BOT":
             print("Uninstallation cancelled.")
@@ -383,6 +711,9 @@ def uninstall_bot(*, confirmed: bool = False) -> None:
 
     SERVICE_FILE.unlink(missing_ok=True)
     COMMAND_FILE.unlink(missing_ok=True)
+    NGINX_CONFIG.unlink(missing_ok=True)
+    if WEB_ROOT.exists() and WEB_ROOT.resolve() == Path("/var/www/sui-bot"):
+        shutil.rmtree(WEB_ROOT)
     for directory in (INSTALL_DIR, CONFIG_DIR, STATE_DIR):
         if directory.is_symlink():
             directory.unlink()
@@ -390,6 +721,9 @@ def uninstall_bot(*, confirmed: bool = False) -> None:
             shutil.rmtree(directory)
 
     subprocess.run([systemctl_executable, "daemon-reload"], check=False)  # noqa: S603
+    if shutil.which("nginx"):
+        subprocess.run([require_command("nginx"), "-t"], check=False)  # noqa: S603
+        subprocess.run([systemctl_executable, "reload", "nginx"], check=False)  # noqa: S603
 
     userdel = shutil.which("userdel")
     if userdel:
@@ -414,13 +748,16 @@ def interactive_menu() -> int:
         "9": validate_configuration,
         "10": update_bot,
         "11": data_diagnostics,
-        "12": uninstall_bot,
+        "12": configure_web_panel,
+        "13": remove_web_panel,
+        "14": uninstall_bot,
     }
     while True:
         print("\n╭──────────────────────────────────────╮")
         print("│          SUI Bot Administration      │")
         print("╰──────────────────────────────────────╯")
         print(f"Service status: {status_summary()}\n")
+        print(f"Web panel:     {web_panel_status()}\n")
         print("  1. Detailed status")
         print("  2. Start bot")
         print("  3. Stop bot")
@@ -432,7 +769,9 @@ def interactive_menu() -> int:
         print("  9. Validate configuration")
         print(" 10. Update SUI Bot from GitHub")
         print(" 11. Diagnose assignments and data")
-        print(" 12. Completely uninstall SUI Bot")
+        print(" 12. Install/update web panel and nginx proxy")
+        print(" 13. Remove web panel and nginx proxy")
+        print(" 14. Completely uninstall SUI Bot")
         print("  0. Exit")
         choice = input("\nSelect an option: ").strip()
         if choice == "0":
@@ -443,7 +782,7 @@ def interactive_menu() -> int:
             continue
         try:
             action()
-        except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
+        except (FileNotFoundError, PermissionError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
         input("\nPress Enter to return to the menu...")
 
@@ -461,6 +800,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="Validate the environment file")
     subparsers.add_parser("doctor", help="Validate assignment and runtime data files")
     subparsers.add_parser("update", help="Download and install the latest version from GitHub")
+    subparsers.add_parser("web-panel", help="Install or update the optional HTTPS web panel")
+    subparsers.add_parser("remove-web-panel", help="Remove the optional web panel and managed nginx site")
     subparsers.add_parser("uninstall", help="Completely uninstall SUI Bot and its managed data")
     return parser
 
@@ -487,10 +828,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "update":
             update_bot()
             return 0
+        if args.command == "web-panel":
+            configure_web_panel()
+            return 0
+        if args.command == "remove-web-panel":
+            remove_web_panel()
+            return 0
         if args.command == "uninstall":
             uninstall_bot()
             return 0
-    except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as exc:
+    except (FileNotFoundError, PermissionError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 2

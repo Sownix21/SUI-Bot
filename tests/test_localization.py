@@ -53,6 +53,12 @@ def test_every_catalog_language_has_every_fixed_translation_key():
         assert set(TRANSLATIONS[language]) == english_keys
 
 
+def test_last_day_and_expired_messages_are_localized() -> None:
+    for language in ("en", "fa", "ru", "zh"):
+        assert "24" in translate(language, "hours_remaining_24") or "۲۴" in translate(language, "hours_remaining_24")
+        assert translate(language, "subscription_expired_title") != "subscription_expired_title"
+
+
 def test_bot_handlers_contain_no_hardcoded_persian_ui_fragments():
     source = (__import__("pathlib").Path(__file__).parents[1] / "src" / "sui_bot" / "bot.py").read_text(encoding="utf-8")
     assert not any("\u0600" <= character <= "\u06ff" for character in source)

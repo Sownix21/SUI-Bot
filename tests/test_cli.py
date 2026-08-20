@@ -35,6 +35,12 @@ def test_validation_rejects_invalid_token_and_runtime_bounds() -> None:
     assert any("REDIS_PORT" in error for error in errors)
 
 
+def test_validation_rejects_public_subscription_origin_with_path() -> None:
+    values = valid_environment()
+    values["SUBSCRIPTION_PUBLIC_ORIGIN"] = "https://example.com/not-an-origin"
+    assert any("must not contain a path" in error for error in cli.validate_environment(values))
+
+
 def test_validation_rejects_state_path_traversal() -> None:
     values = valid_environment()
     values["BACKUP_DIR"] = "../../outside"

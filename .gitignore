@@ -1,8 +1,20 @@
 __pycache__/
 *.py[cod]
+*$py.class
 *.log
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.tox/
+.nox/
 .env
+.env.*
+!.env.example
 .venv/
+venv/
+env/
 .test-deps/
 .verify-deps/
 .package-test/
@@ -11,6 +23,11 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+.eggs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 backups/
 assignments.json
 expired_notifications.json
@@ -18,3 +35,4 @@ inbounds_cache.json
 metrics.json
 runtime_settings.json
 subscription_cache.json
+connection_guides.json

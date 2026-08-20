@@ -60,3 +60,15 @@ def test_invalid_subscription_port_setting_in_backup_is_rejected(tmp_path):
     source.write_text('{"HIDE_SUBSCRIPTION_PORT": "sometimes"}', encoding="utf-8")
     with pytest.raises(ValueError, match="subscription-port"):
         build_bundle({"runtime_settings": source}, {})
+
+
+def test_connection_guides_are_validated_in_backup(tmp_path):
+    source = tmp_path / "connection_guides.json"
+    source.write_text(
+        '{"version": 1, "enabled": true, "guides": '
+        '[{"id": "abcdef123456", "title": "Android", '
+        '"messages": [{"type": "text", "text": "Install app"}]}]}',
+        encoding="utf-8",
+    )
+    bundle = build_bundle({"connection_guides": source}, {})
+    assert bundle["state"]["connection_guides"]["enabled"] is True

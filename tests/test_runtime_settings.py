@@ -1,6 +1,6 @@
 import pytest
 
-from sui_bot.runtime_settings import load_runtime_settings, save_runtime_setting
+from sui_bot.runtime_settings import load_runtime_settings, remove_runtime_setting, save_runtime_setting
 
 
 def test_only_non_secret_settings_can_be_persisted(tmp_path) -> None:
@@ -22,3 +22,5 @@ def test_subscription_port_preference_is_an_allowed_runtime_setting(tmp_path) ->
     target = tmp_path / "settings.json"
     save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", str(target))
     assert load_runtime_settings(str(target))["HIDE_SUBSCRIPTION_PORT"] == "true"
+    remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(target))
+    assert "HIDE_SUBSCRIPTION_PORT" not in load_runtime_settings(str(target))

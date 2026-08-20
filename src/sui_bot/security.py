@@ -50,7 +50,7 @@ def can_access_client(
     return assigned == client_id
 
 
-PUBLIC_CALLBACK_ACTIONS = {"language_settings", "main_menu", "my_usage"}
+PUBLIC_CALLBACK_ACTIONS = {"language_settings", "main_menu", "my_usage", "connection_guides"}
 PUBLIC_CALLBACK_PREFIXES = (
     "lang_set_",
     "my_usage_",
@@ -59,6 +59,7 @@ PUBLIC_CALLBACK_PREFIXES = (
     "renew_start_",
     "renew_choose_",
     "renew_cancel_",
+    "connection_guide_",
 )
 
 

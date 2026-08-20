@@ -25,11 +25,42 @@ def extract_load_metadata(data: dict[str, Any] | None) -> tuple[str, list[dict[s
     return sub_uri.rstrip("/"), clean_inbounds
 
 
-def build_web_panel_url(subscription_base: str, username: str) -> str:
-    parsed = urlsplit(subscription_base)
-    if not parsed.hostname:
-        raise ValueError("invalid subscription base URL")
-    return f"https://{parsed.hostname}:2083/dF84Xaql5O9b1/{quote(username, safe='')}"
+def build_web_panel_url(web_panel_base: str, username: str, display_name: str | None = None) -> str:
+    parsed = urlsplit(web_panel_base)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid web-panel base URL") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid web-panel base URL")
+    url = f"{web_panel_base.rstrip('/')}/{quote(username, safe='')}"
+    if display_name:
+        url = f"{url}?title={quote(display_name, safe='')}"
+    return url
+
+
+def replace_url_origin(url: str, public_origin: str) -> str:
+    """Replace only scheme/netloc while retaining the S-UI subscription path."""
+    parsed = urlsplit(url)
+    origin = urlsplit(public_origin)
+    try:
+        _ = origin.port
+    except ValueError as exc:
+        raise ValueError("invalid public subscription origin") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("invalid subscription URL")
+    if origin.scheme != "https" or not origin.hostname or origin.path not in {"", "/"}:
+        raise ValueError("public subscription origin must be an HTTPS origin without a path")
+    if origin.username or origin.password or origin.query or origin.fragment:
+        raise ValueError("invalid public subscription origin")
+    return urlunsplit((origin.scheme, origin.netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def build_subscription_urls(

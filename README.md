@@ -11,6 +11,7 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 - Display usage, expiry, status, subscription links, and web-panel links.
 - Handle renewal plans, payment receipts, approval, and rejection.
 - Send broadcasts and expiry reminders.
+- Let administrators publish ordered, media-rich connection guides for Android, iOS, Windows, or custom platforms.
 - Create size-limited database backups and report server health.
 - Export and restore bot assignments, user preferences, metrics, runtime configuration, and cached state as one validated file.
 - Support English, Persian, Russian, and Chinese per Telegram account.
@@ -81,7 +82,18 @@ The administrator can change the owner-facing brand from **Settings → Set mess
 
 The admin-only **Remove port from subscription links** setting can produce clean user-facing URLs such as `https://example.com/path/user/` instead of `https://example.com:2096/path/user/`. Enabling it requires a separate confirmation after a warning. Configure nginx, another reverse proxy, or equivalent server routing first so portless requests reach the S-UI subscription endpoint; otherwise the rewritten links will fail. The bot does not modify nginx or the S-UI server.
 
-Expiry reminders include direct renewal actions. A single expiring subscription gets one renewal action, while reminders containing several expiring subscriptions provide a separate action for each subscription.
+Expiry reminders include direct renewal actions. The final-day reminder says **24 hours remaining** rather than one day. When an assigned subscription expires, its Telegram user receives a localized expiration message with the appropriate renewal button; the administrator still receives the separate expiration report. A single expiring subscription gets one renewal action, while messages containing several subscriptions provide a separate action for each subscription.
+
+### Connection guides
+
+The administrator can open **Settings → Connection Guides** to:
+
+1. Add Android, iOS, Windows, macOS, Linux, or any custom option.
+2. Send up to 30 text messages, photos, videos, or documents in the exact order users should receive them. Media captions are retained.
+3. Send `/done` to save the guide, then enable the feature.
+4. Disable the user button or delete individual guides later.
+
+When enabled, users see a localized **Connection Guide** button in the main menu. Guide titles and administrator-authored content are intentionally delivered exactly as entered. Guide configuration and reusable Telegram media IDs are stored in `/var/lib/sui-bot/connection_guides.json` and included in SUI Bot state backups.
 
 Users with one assigned client see **My Subscription** and go directly to it. **My Subscriptions** and the subscription-list back button are shown only to users with multiple assigned clients.
 
@@ -118,8 +130,30 @@ sui-bot show-config
 sui-bot validate
 sudo sui-bot doctor
 sudo sui-bot update
+sudo sui-bot web-panel
+sudo sui-bot remove-web-panel
 sudo sui-bot uninstall
 ```
+
+## Optional web panel and clean-link proxy
+
+The regular SUI Bot install and update commands do **not** install nginx, request a certificate, or publish this panel. They only include the inactive template. Web setup starts only when the owner explicitly selects the web-panel menu option or runs the command below.
+
+Run `sudo sui-bot` and choose **Install/update web panel and nginx proxy**, or run `sudo sui-bot web-panel`. The setup uses the bundled dashboard based on the supplied owner design, but generates every server-specific value at installation time. It:
+
+- reads the current S-UI subscription path and private port from `/var/lib/sui-bot/subscription_cache.json`;
+- asks for the public domain, dashboard title, a private dashboard route, and a dedicated dashboard HTTPS port (default `2083`);
+- installs nginx and Certbot through `apt`, `dnf`, or `yum` when approved and missing;
+- obtains or reuses a Let's Encrypt certificate;
+- writes only `/etc/nginx/conf.d/sui-bot-web-panel.conf`—it never overwrites nginx's `default` site;
+- keeps the listeners separate: clean subscription links use public HTTPS `443`, the dashboard uses its selected port such as `2083`, and nginx proxies subscriptions internally to the detected S-UI port such as `2096`;
+- renders the dashboard without embedding a VPS IP, S-UI token, fixed domain, fixed port, or fixed subscription path;
+- runs `nginx -t` before every reload and restores the previous managed configuration if setup fails;
+- configures the bot's Web Panel button and restarts SUI Bot.
+
+The dashboard port must differ from ports `80`, `443`, and the S-UI subscription port, and it must not already be occupied by another service or nginx site. The installer explains this requirement and checks the selected port before making changes. Automatic setup is portable across systemd VPSs using the supported package managers when S-UI is on the same VPS. It still cannot create DNS records or open provider firewalls: before running it, point a dedicated domain to the VPS and allow inbound TCP 80, 443, and the selected dashboard port. If another nginx site already owns that domain, setup refuses to continue rather than modifying unrelated configuration. Remove only the managed panel with `sudo sui-bot remove-web-panel`; certificates and shared nginx packages are retained for safety.
+
+The dashboard title follows the current **message display name** configured in Telegram Settings whenever a user opens a newly generated Web Panel link. This still does not change the bot's BotFather profile name or `@username`. A previously sent Telegram message may contain the earlier title; reopening the bot menu generates a fresh link.
 
 ## Backup and restore bot state
 
@@ -132,7 +166,7 @@ To create one:
 3. Select **Create & Send Backup**.
 4. Keep the received `.sui-backup.json` document private.
 
-The bundle includes assignments, Telegram user language preferences, metrics, renewal/payment runtime settings, subscription and inbound caches, and expiry-notification state. It also includes a non-secret configuration summary. `BOT_TOKEN` and `SUI_TOKEN` are intentionally excluded because Telegram backup documents should not contain reusable service credentials.
+The bundle includes assignments, Telegram user language preferences, connection guides, metrics, renewal/payment runtime settings, subscription and inbound caches, and expiry-notification state. It also includes a non-secret configuration summary. `BOT_TOKEN` and `SUI_TOKEN` are intentionally excluded because Telegram backup documents should not contain reusable service credentials.
 
 To restore the bundle:
 
@@ -166,6 +200,9 @@ Updates replace the application and virtual environment but preserve:
 | `/var/lib/sui-bot/backups` | Downloaded database backups |
 | `/var/lib/sui-bot/user_languages.json` | Per-user language preferences |
 | `/var/lib/sui-bot/runtime_settings.json` | Renewal and payment display settings |
+| `/var/lib/sui-bot/connection_guides.json` | Enabled state and administrator-authored connection guides |
+| `/var/www/sui-bot/index.html` | Generated optional web-panel page |
+| `/etc/nginx/conf.d/sui-bot-web-panel.conf` | Optional nginx site managed by `sui-bot web-panel` |
 | `/var/lib/sui-bot/subscription_cache.json` | Last valid S-UI subscription URI |
 | `/var/lib/sui-bot/inbounds_cache.json` | Last valid inbound list |
 | `/etc/systemd/system/sui-bot.service` | systemd service definition |
