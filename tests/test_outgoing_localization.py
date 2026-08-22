@@ -36,6 +36,11 @@ def test_server_values_are_preserved_even_when_they_match_fixed_ui_words():
     assert localize_outgoing_text("en", server_name) == "Back"
 
 
+def test_complete_server_status_output_remains_plain_english():
+    status = "💻 SERVER STATUS\nHostname: Server Status\nStatus: Running\nServer response: Back"
+    assert localize_outgoing_text("fa", preserve_dynamic_text(status)) == status
+
+
 def test_owner_brand_replaces_fixed_brand_but_not_server_values():
     source = f"Welcome to SUI Bot\nServer: {preserve_dynamic_text('SUI Bot')}"
     assert localize_outgoing_text("en", source, display_name="Owner VPN") == (

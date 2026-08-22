@@ -14,10 +14,30 @@ from typing import Any, Mapping
 MAX_GUIDES = 20
 MAX_MESSAGES_PER_GUIDE = 30
 MAX_TITLE_LENGTH = 48
-MAX_TEXT_LENGTH = 4096
+MAX_TEXT_LENGTH = 32768
 MAX_CAPTION_LENGTH = 1024
+TELEGRAM_TEXT_LENGTH = 4096
 MESSAGE_TYPES = frozenset({"text", "photo", "video", "document"})
 GUIDE_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
+
+
+def split_guide_text(text: str, limit: int = TELEGRAM_TEXT_LENGTH) -> list[str]:
+    """Split administrator-authored text without losing or changing its contents."""
+    if limit < 1:
+        raise ValueError("text chunk limit must be positive")
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        boundary = remaining.rfind("\n", 0, limit)
+        if boundary <= 0:
+            boundary = limit
+        else:
+            boundary += 1
+        chunks.append(remaining[:boundary])
+        remaining = remaining[boundary:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def _has_unsafe_control(value: str) -> bool:
@@ -133,6 +153,50 @@ class ConnectionGuideStore:
         self._save()
         return guide_id
 
+    def update_title(self, guide_id: str, title: str) -> bool:
+        guides = self.list_guides()
+        for guide in guides:
+            if guide["id"] == guide_id:
+                guide["title"] = title
+                self._commit_guides(guides)
+                return True
+        return False
+
+    def replace_message(self, guide_id: str, index: int, message: dict[str, str]) -> bool:
+        guides = self.list_guides()
+        for guide in guides:
+            if guide["id"] == guide_id:
+                if not 0 <= index < len(guide["messages"]):
+                    return False
+                guide["messages"][index] = message
+                self._commit_guides(guides)
+                return True
+        return False
+
+    def append_message(self, guide_id: str, message: dict[str, str]) -> bool:
+        guides = self.list_guides()
+        for guide in guides:
+            if guide["id"] == guide_id:
+                if len(guide["messages"]) >= MAX_MESSAGES_PER_GUIDE:
+                    raise ValueError(f"only {MAX_MESSAGES_PER_GUIDE} messages are allowed per guide")
+                guide["messages"].append(message)
+                self._commit_guides(guides)
+                return True
+        return False
+
+    def delete_message(self, guide_id: str, index: int) -> bool:
+        guides = self.list_guides()
+        for guide in guides:
+            if guide["id"] == guide_id:
+                if len(guide["messages"]) == 1:
+                    raise ValueError("a connection guide must retain at least one message")
+                if not 0 <= index < len(guide["messages"]):
+                    return False
+                del guide["messages"][index]
+                self._commit_guides(guides)
+                return True
+        return False
+
     def delete(self, guide_id: str) -> bool:
         guides = [guide for guide in self._data["guides"] if guide["id"] != guide_id]
         if len(guides) == len(self._data["guides"]):
@@ -142,6 +206,11 @@ class ConnectionGuideStore:
             self._data["enabled"] = False
         self._save()
         return True
+
+    def _commit_guides(self, guides: list[dict[str, Any]]) -> None:
+        candidate = {**self._data, "guides": guides}
+        self._data = validate_guide_data(candidate)
+        self._save()
 
     def _save(self) -> None:
         self._data = validate_guide_data(self._data)

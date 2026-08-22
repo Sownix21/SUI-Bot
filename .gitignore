@@ -36,3 +36,6 @@ metrics.json
 runtime_settings.json
 subscription_cache.json
 connection_guides.json
+
+# Local S-UI source used for compatibility checks; not part of the bot package.
+PANEL/

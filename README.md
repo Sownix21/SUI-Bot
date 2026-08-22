@@ -89,9 +89,10 @@ Expiry reminders include direct renewal actions. The final-day reminder says **2
 The administrator can open **Settings → Connection Guides** to:
 
 1. Add Android, iOS, Windows, macOS, Linux, or any custom option.
-2. Send up to 30 text messages, photos, videos, or documents in the exact order users should receive them. Media captions are retained.
+2. Send up to 30 text messages, photos, videos, or documents in the exact order users should receive them. Media captions are retained, and long text is split safely when delivered.
 3. Send `/done` to save the guide, then enable the feature.
-4. Disable the user button or delete individual guides later.
+4. Edit a saved guide's title, replace or delete any item, or append new items without recreating the guide.
+5. Disable the user button or delete individual guides later.
 
 When enabled, users see a localized **Connection Guide** button in the main menu. Guide titles and administrator-authored content are intentionally delivered exactly as entered. Guide configuration and reusable Telegram media IDs are stored in `/var/lib/sui-bot/connection_guides.json` and included in SUI Bot state backups.
 

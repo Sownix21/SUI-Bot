@@ -27,10 +27,16 @@ from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.helpers import escape_markdown
 from telegram.request import HTTPXRequest
 
-from .backup import BackupTooLargeError, stream_response_to_file
+from .backup import BackupTooLargeError, stream_response_to_file, validate_sqlite_database
 from .backup_bundle import MAX_BUNDLE_BYTES, build_bundle, load_bundle, restore_bundle, write_bundle
 from .config import Settings, validate_display_name
-from .connection_guides import ConnectionGuideStore, MAX_MESSAGES_PER_GUIDE, MAX_TITLE_LENGTH
+from .connection_guides import (
+    ConnectionGuideStore,
+    MAX_MESSAGES_PER_GUIDE,
+    MAX_TITLE_LENGTH,
+    split_guide_text,
+    validate_guide_message,
+)
 from .reporting import (
     expiring_clients_with_assignments,
     load_expired_notification_ids,
@@ -175,6 +181,7 @@ BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(17, 19)
 SETTINGS_CARD_NUMBER, SETTINGS_CARD_HOLDER, SETTINGS_DISPLAY_NAME = range(19, 22)
 RESTORE_BACKUP_FILE = 22
 CONNECTION_GUIDE_TITLE, CONNECTION_GUIDE_CONTENT = range(23, 25)
+CONNECTION_GUIDE_EDIT_TITLE, CONNECTION_GUIDE_EDIT_ITEM, CONNECTION_GUIDE_APPEND_ITEM = range(25, 28)
 
 _user_requests = {}
 _blocked_users = {}
@@ -504,6 +511,16 @@ class LocalizedExtBot(ExtBot):
         )
         return await super().send_photo(chat_id, photo, *args, **kwargs)
 
+    async def send_video(self, chat_id, video, *args, **kwargs):
+        language = self._language(chat_id)
+        kwargs["caption"] = localize_outgoing_text(
+            language, kwargs.get("caption"), display_name=BOT_DISPLAY_NAME
+        )
+        kwargs["reply_markup"] = localize_inline_markup(
+            kwargs.get("reply_markup"), language, self, display_name=BOT_DISPLAY_NAME
+        )
+        return await super().send_video(chat_id, video, *args, **kwargs)
+
     async def edit_message_caption(self, *args, chat_id=None, caption=None, **kwargs):
         language = self._language(chat_id)
         localized_caption = localize_outgoing_text(language, caption, display_name=BOT_DISPLAY_NAME)
@@ -519,6 +536,23 @@ def is_safe_callback_data(data: str) -> bool:
         return False
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:-")
     return all(ch in allowed for ch in data)
+
+def sui_response_object(response: object) -> dict | None:
+    """Return a successful S-UI response object, rejecting error envelopes."""
+    if not isinstance(response, dict) or response.get("success") is not True:
+        return None
+    obj = response.get("obj")
+    return obj if isinstance(obj, dict) else None
+
+
+def sui_clients(response: object) -> list[dict] | None:
+    """Return a fully validated clients collection from an S-UI envelope."""
+    obj = sui_response_object(response)
+    clients = obj.get("clients") if obj is not None else None
+    if not isinstance(clients, list) or any(not isinstance(client, dict) for client in clients):
+        return None
+    return clients
+
 
 class APIClient:
     def __init__(self, base_url: str, token: str):
@@ -559,7 +593,11 @@ class APIClient:
                     headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
                 ) as response:
                     response.raise_for_status()
-                    return await self.decode_json_response(response)
+                    decoded = await self.decode_json_response(response)
+                    if sui_response_object(decoded) is None:
+                        logger.warning("S-UI GET %s returned an unsuccessful API response", endpoint)
+                        return None
+                    return decoded
             except asyncio.CancelledError:
                 raise
             except aiohttp.ClientResponseError as exc:
@@ -617,9 +655,9 @@ def random_seq(n: int = 10) -> str:
     return random_alnum(n)
 
 def random_shadowsocks_password(length: int) -> str:
-    # Keep fixed output length like RandomUtil.randomShadowsocksPassword(n)
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    # S-UI's RandomUtil.randomShadowsocksPassword(n) generates n random
+    # bytes and returns their standard Base64 representation.
+    return rand_b64(length)
 
 def random_uuid() -> str:
     return str(uuid.uuid4())
@@ -701,6 +739,15 @@ def build_client_data_new(
         "down": 0,
         "desc": desc,
         "group": group,
+        "remark": "",
+        "delayStart": False,
+        "autoReset": False,
+        "resetDays": 0,
+        "nextReset": 0,
+        "totalUp": 0,
+        "totalDown": 0,
+        "createdAt": 0,
+        "onlineAt": 0,
     }
 
 def build_client_data_edit(
@@ -727,11 +774,32 @@ def build_client_data_edit(
         "desc": desc,
         "group": group,
         "links": [],
+        "remark": "",
+        "delayStart": False,
+        "autoReset": False,
+        "resetDays": 0,
+        "nextReset": 0,
+        "totalUp": 0,
+        "totalDown": 0,
+        "createdAt": 0,
+        "onlineAt": 0,
     }
     if original_client:
         edited["up"] = original_client.get("up", 0)
         edited["down"] = original_client.get("down", 0)
         edited["links"] = original_client.get("links", [])
+        for field, default in (
+            ("remark", ""),
+            ("delayStart", False),
+            ("autoReset", False),
+            ("resetDays", 0),
+            ("nextReset", 0),
+            ("totalUp", 0),
+            ("totalDown", 0),
+            ("createdAt", 0),
+            ("onlineAt", 0),
+        ):
+            edited[field] = original_client.get(field, default)
     if regenerate_secrets:
         if original_client and isinstance(original_client.get("config"), dict):
             cfg = json.loads(json.dumps(original_client.get("config", {})))
@@ -1102,7 +1170,9 @@ async def get_client_usage(client_id: int) -> str:
         data = await api_client.get('apiv2/clients', {'id': client_id})
         if not data:
             return "❌ Server unresponsive. Try Again Later."
-        clients = data.get("obj", {}).get("clients", [])
+        clients = sui_clients(data)
+        if clients is None:
+            return "❌ Invalid response from server. Try Again Later."
         if not clients:
             return "❌ User Not Found"
         client = clients[0]
@@ -1120,7 +1190,11 @@ async def get_all_clients_list():
         data = await api_client.get('apiv2/clients')
         if not data:
             return clients_cache if clients_cache else []
-        clients_cache = data.get("obj", {}).get("clients", [])
+        clients = sui_clients(data)
+        if clients is None:
+            logger.warning("S-UI clients response was malformed; retaining the previous cache")
+            return clients_cache if clients_cache else []
+        clients_cache = clients
         clients_cache_time = now
         return clients_cache
     except Exception:
@@ -1177,13 +1251,29 @@ def renewal_amount(months: int) -> int:
     return RENEWAL_MONTHLY_PRICE * months
 
 def build_settings_menu_text() -> str:
+    return (
+        "⚙️ Admin Settings\n\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'settings_choose_category')}"
+    )
+
+
+def build_payment_settings_text() -> str:
     months_text = ", ".join(f"{m}M" for m in get_renewal_month_options())
     holder_line = (
         f"\n👤 Card Holder: {preserve_dynamic_text(PAYMENT_CARD_HOLDER)}"
         if PAYMENT_CARD_HOLDER else ""
     )
-    display_name = preserve_dynamic_text(BOT_DISPLAY_NAME)
     card_number = preserve_dynamic_text(ltr_isolate(PAYMENT_CARD_NUMBER))
+    return (
+        f"{tr(ADMIN_TELEGRAM_ID, 'payments_and_renewal')}\n\n"
+        f"💰 Price Per Month: {RENEWAL_MONTHLY_PRICE:,} Tooman\n"
+        f"📦 Enabled Renewal Options: {months_text}\n"
+        f"🏦 Card Number: {card_number}{holder_line}"
+    )
+
+
+def build_admin_tools_settings_text() -> str:
+    display_name = preserve_dynamic_text(BOT_DISPLAY_NAME)
     port_status = tr(
         ADMIN_TELEGRAM_ID,
         "subscription_port_hidden" if HIDE_SUBSCRIPTION_PORT else "subscription_port_kept",
@@ -1196,23 +1286,35 @@ def build_settings_menu_text() -> str:
         else "web_panel_disabled"
     )
     return (
-        "⚙️ Admin Settings\n\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'administration')}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
-        f"💰 Price Per Month: {RENEWAL_MONTHLY_PRICE:,} Tooman\n"
-        f"📦 Enabled Renewal Options: {months_text}\n"
-        f"🏦 Card Number: {card_number}{holder_line}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'subscription_link_mode')}: {port_status}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'web_panel_setting')}: {tr(ADMIN_TELEGRAM_ID, web_panel_status_key)}\n\n"
-        "Use buttons below to update renewal settings."
+        f"{tr(ADMIN_TELEGRAM_ID, 'guide_admin_count')}: {len(connection_guide_store.list_guides())}"
     )
 
 def build_settings_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "payments_and_renewal"), callback_data='settings_payments')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "administration"), callback_data='settings_admin_tools')],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
+    ])
+
+
+def build_payment_settings_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Renewal Plans", callback_data='settings_plans')],
         [InlineKeyboardButton("➖ 10K", callback_data='settings_price_minus_10000'), InlineKeyboardButton("➕ 10K", callback_data='settings_price_plus_10000')],
         [InlineKeyboardButton("➖ 50K", callback_data='settings_price_minus_50000'), InlineKeyboardButton("➕ 50K", callback_data='settings_price_plus_50000')],
         [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
         [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
+        [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
+        [InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')],
+    ])
+
+
+def build_admin_tools_settings_keyboard():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "connection_guides_title"), callback_data='settings_connection_guides')],
         [InlineKeyboardButton(
@@ -1227,15 +1329,14 @@ def build_settings_menu_keyboard():
             callback_data='settings_web_panel',
         )],
         [InlineKeyboardButton("💾 Backup & Restore", callback_data='settings_backup_restore')],
-        [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
+        [InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')],
     ])
 
 def build_backup_restore_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Create & Send Backup", callback_data='settings_backup_create')],
         [InlineKeyboardButton("📥 Restore Instructions", callback_data='settings_backup_help')],
-        [InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')],
+        [InlineKeyboardButton("🔙 Back", callback_data='settings_admin_tools')],
     ])
 
 
@@ -1256,8 +1357,9 @@ def build_connection_guides_admin_keyboard(user_id: int) -> InlineKeyboardMarkup
         [InlineKeyboardButton(tr(user_id, "guide_add"), callback_data="settings_guides_add")],
     ]
     if connection_guide_store.list_guides():
+        rows.append([InlineKeyboardButton(tr(user_id, "guide_edit"), callback_data="settings_guides_edit")])
         rows.append([InlineKeyboardButton(tr(user_id, "guide_delete"), callback_data="settings_guides_delete")])
-    rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="admin_settings")])
+    rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="settings_admin_tools")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1268,6 +1370,42 @@ def build_connection_guides_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton(tr(user_id, "main_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
+
+
+def guide_item_label(index: int, item: dict[str, str]) -> str:
+    kind = item["type"].capitalize()
+    content = item.get("text") or item.get("caption") or ""
+    preview = " ".join(content.split())[:28]
+    suffix = f" — {preview}" if preview else ""
+    return preserve_dynamic_text(f"{index + 1}. {kind}{suffix}")
+
+
+def build_connection_guide_edit_text(user_id: int, guide: dict[str, Any]) -> str:
+    return (
+        f"{tr(user_id, 'guide_edit')}: {preserve_dynamic_text(guide['title'])}\n\n"
+        f"{tr(user_id, 'guide_items')}: {len(guide['messages'])}"
+    )
+
+
+def build_connection_guide_edit_keyboard(user_id: int, guide: dict[str, Any]) -> InlineKeyboardMarkup:
+    guide_id = guide["id"]
+    rows = [[InlineKeyboardButton(tr(user_id, "guide_edit_title"), callback_data=f"settings_guides_title_{guide_id}")]]
+    rows.extend([
+        [InlineKeyboardButton(guide_item_label(index, item), callback_data=f"settings_guides_item_{guide_id}_{index}")]
+        for index, item in enumerate(guide["messages"])
+    ])
+    if len(guide["messages"]) < MAX_MESSAGES_PER_GUIDE:
+        rows.append([InlineKeyboardButton(tr(user_id, "guide_add_item"), callback_data=f"settings_guides_append_{guide_id}")])
+    rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="settings_guides_edit")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_connection_guide_item_keyboard(user_id: int, guide_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user_id, "guide_replace_item"), callback_data=f"settings_guides_replace_{guide_id}_{index}")],
+        [InlineKeyboardButton(tr(user_id, "guide_delete_item"), callback_data=f"settings_guides_item_delete_{guide_id}_{index}")],
+        [InlineKeyboardButton(tr(user_id, "back"), callback_data=f"settings_guides_edit_{guide_id}")],
+    ])
 
 def bot_state_paths() -> dict[str, str]:
     return {
@@ -1399,7 +1537,7 @@ def build_settings_plans_keyboard():
     for m in range(1, 13):
         icon = "✅" if m in enabled else "⬜"
         rows.append([InlineKeyboardButton(f"{icon} {m} Month", callback_data=f'settings_plan_toggle_{m}')])
-    rows.append([InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='settings_payments')])
     return InlineKeyboardMarkup(rows)
 
 def normalize_card_number(raw: str) -> Optional[str]:
@@ -1421,7 +1559,7 @@ async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE
             "💳 Enter new card number.\n"
             "You can send digits with or without dashes.\n\n"
             "Cancel: /cancel",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='admin_settings')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='settings_payments')]])
         )
         return SETTINGS_CARD_NUMBER
 
@@ -1430,14 +1568,14 @@ async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE
             "👤 Enter new card holder name.\n"
             "Use `-` to clear holder name.\n\n"
             "Cancel: /cancel",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='admin_settings')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='settings_payments')]])
         )
         return SETTINGS_CARD_HOLDER
 
     if query.data == "settings_set_display_name":
         await query.edit_message_text(
             tr(query.from_user.id, "enter_display_name"),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(query.from_user.id, "back"), callback_data='admin_settings')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(query.from_user.id, "back"), callback_data='settings_admin_tools')]])
         )
         return SETTINGS_DISPLAY_NAME
 
@@ -1458,7 +1596,7 @@ async def settings_card_number_input(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(
         f"✅ Card number updated to:\n`{PAYMENT_CARD_NUMBER}`",
         parse_mode='Markdown',
-        reply_markup=build_settings_menu_keyboard()
+        reply_markup=build_payment_settings_keyboard()
     )
     return ConversationHandler.END
 
@@ -1480,7 +1618,7 @@ async def settings_card_holder_input(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(
         f"✅ Card holder updated:\n`{md_escape(holder_text)}`",
         parse_mode='Markdown',
-        reply_markup=build_settings_menu_keyboard()
+        reply_markup=build_payment_settings_keyboard()
     )
     return ConversationHandler.END
 
@@ -1499,7 +1637,7 @@ async def settings_display_name_input(update: Update, context: ContextTypes.DEFA
     save_runtime_setting("BOT_DISPLAY_NAME", BOT_DISPLAY_NAME, RUNTIME_SETTINGS_FILE)
     await update.message.reply_text(
         tr(update.effective_user.id, "display_name_updated", name=preserve_dynamic_text(BOT_DISPLAY_NAME)),
-        reply_markup=build_settings_menu_keyboard(),
+        reply_markup=build_admin_tools_settings_keyboard(),
     )
     return ConversationHandler.END
 
@@ -1557,7 +1695,11 @@ async def connection_guide_content_input(update: Update, context: ContextTypes.D
     if payload is None:
         await update.message.reply_text(tr(update.effective_user.id, "guide_unsupported"))
         return CONNECTION_GUIDE_CONTENT
-    messages.append(payload)
+    try:
+        messages.append(validate_guide_message(payload))
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ {exc}")
+        return CONNECTION_GUIDE_CONTENT
     await update.message.reply_text(tr(update.effective_user.id, "guide_item_saved", count=len(messages)))
     return CONNECTION_GUIDE_CONTENT
 
@@ -1586,6 +1728,7 @@ async def connection_guide_done(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def connection_guide_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("new_connection_guide", None)
+    context.user_data.pop("connection_guide_edit", None)
     if update.effective_user.id == ADMIN_TELEGRAM_ID:
         await update.message.reply_text(
             tr(update.effective_user.id, "guide_cancelled"),
@@ -1597,7 +1740,8 @@ async def connection_guide_cancel(update: Update, context: ContextTypes.DEFAULT_
 async def send_connection_guide(context: ContextTypes.DEFAULT_TYPE, chat_id: int, guide: dict[str, Any]) -> None:
     for item in guide["messages"]:
         if item["type"] == "text":
-            await context.bot.send_message(chat_id=chat_id, text=preserve_dynamic_text(item["text"]))
+            for chunk in split_guide_text(item["text"]):
+                await context.bot.send_message(chat_id=chat_id, text=preserve_dynamic_text(chunk))
         elif item["type"] == "photo":
             caption = preserve_dynamic_text(item["caption"]) if item.get("caption") else None
             await context.bot.send_photo(chat_id=chat_id, photo=item["file_id"], caption=caption)
@@ -1609,6 +1753,80 @@ async def send_connection_guide(context: ContextTypes.DEFAULT_TYPE, chat_id: int
             await context.bot.send_document(chat_id=chat_id, document=item["file_id"], caption=caption)
         await asyncio.sleep(0.15)
 
+
+async def connection_guide_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await localized_query_answer(query)
+    if query.from_user.id != ADMIN_TELEGRAM_ID:
+        return ConversationHandler.END
+    data = query.data
+    if data.startswith("settings_guides_title_"):
+        guide_id = data.removeprefix("settings_guides_title_")
+        mode, state, prompt = "title", CONNECTION_GUIDE_EDIT_TITLE, "guide_send_new_title"
+        index = None
+    elif data.startswith("settings_guides_replace_"):
+        payload = data.removeprefix("settings_guides_replace_")
+        guide_id, raw_index = payload.rsplit("_", 1)
+        mode, state, prompt, index = "replace", CONNECTION_GUIDE_EDIT_ITEM, "guide_send_replacement", int(raw_index)
+    else:
+        guide_id = data.removeprefix("settings_guides_append_")
+        mode, state, prompt, index = "append", CONNECTION_GUIDE_APPEND_ITEM, "guide_send_append", None
+    if connection_guide_store.get(guide_id) is None:
+        await localized_query_answer(query, tr(query.from_user.id, "guide_unavailable"), show_alert=True)
+        return ConversationHandler.END
+    context.user_data["connection_guide_edit"] = {"guide_id": guide_id, "mode": mode, "index": index}
+    await query.edit_message_text(tr(query.from_user.id, prompt))
+    return state
+
+
+async def connection_guide_edit_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    edit = context.user_data.get("connection_guide_edit", {})
+    title = " ".join((update.message.text or "").split())
+    if not title or len(title) > MAX_TITLE_LENGTH:
+        await update.message.reply_text(tr(update.effective_user.id, "guide_send_new_title"))
+        return CONNECTION_GUIDE_EDIT_TITLE
+    updated = await asyncio.to_thread(connection_guide_store.update_title, edit.get("guide_id", ""), title)
+    return await finish_connection_guide_edit(update, context, updated, "guide_title_updated")
+
+
+async def connection_guide_edit_item_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    edit = context.user_data.get("connection_guide_edit", {})
+    payload = connection_guide_message_payload(update.message)
+    if payload is None:
+        await update.message.reply_text(tr(update.effective_user.id, "guide_unsupported"))
+        return CONNECTION_GUIDE_EDIT_ITEM if edit.get("mode") == "replace" else CONNECTION_GUIDE_APPEND_ITEM
+    try:
+        payload = validate_guide_message(payload)
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ {exc}")
+        return CONNECTION_GUIDE_EDIT_ITEM if edit.get("mode") == "replace" else CONNECTION_GUIDE_APPEND_ITEM
+    if edit.get("mode") == "replace":
+        updated = await asyncio.to_thread(
+            connection_guide_store.replace_message, edit.get("guide_id", ""), edit.get("index", -1), payload
+        )
+        notice = "guide_item_updated"
+    else:
+        try:
+            updated = await asyncio.to_thread(connection_guide_store.append_message, edit.get("guide_id", ""), payload)
+        except ValueError:
+            await update.message.reply_text(tr(update.effective_user.id, "guide_limit"))
+            return ConversationHandler.END
+        notice = "guide_item_added"
+    return await finish_connection_guide_edit(update, context, updated, notice)
+
+
+async def finish_connection_guide_edit(update: Update, context: ContextTypes.DEFAULT_TYPE, updated: bool, notice: str):
+    edit = context.user_data.pop("connection_guide_edit", {})
+    guide = connection_guide_store.get(edit.get("guide_id", ""))
+    if not updated or guide is None:
+        await update.message.reply_text(tr(update.effective_user.id, "guide_unavailable"))
+    else:
+        await update.message.reply_text(
+            tr(update.effective_user.id, notice),
+            reply_markup=build_connection_guide_edit_keyboard(update.effective_user.id, guide),
+        )
+    return ConversationHandler.END
+
 def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
     subscription_key = "my_subscriptions" if has_multiple_subscriptions(telegram_clients, uid) else "my_subscription"
@@ -1616,7 +1834,7 @@ def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     if is_admin:
         keyboard.extend([
             [InlineKeyboardButton(tr(uid, "all_users"), callback_data='all_clients_page_1'), InlineKeyboardButton(tr(uid, "online_users"), callback_data='online_users')],
-            [InlineKeyboardButton(tr(uid, "server_status"), callback_data='server_status'), InlineKeyboardButton(tr(uid, "bot_stats"), callback_data='bot_stats')],
+            [InlineKeyboardButton(preserve_dynamic_text("💻 Server Status"), callback_data='server_status'), InlineKeyboardButton(tr(uid, "bot_stats"), callback_data='bot_stats')],
             [InlineKeyboardButton(tr(uid, "links"), callback_data='manage_links'), InlineKeyboardButton(tr(uid, "broadcast"), callback_data='broadcast_message')],
             [InlineKeyboardButton(tr(uid, "inactive_users"), callback_data='check_inactive_users'), InlineKeyboardButton(tr(uid, "delete_user"), callback_data='delete_user_prompt')],
             [InlineKeyboardButton(tr(uid, "create_user"), callback_data='create_user_prompt'), InlineKeyboardButton(tr(uid, "edit_user"), callback_data='edit_user_prompt')],
@@ -1706,11 +1924,8 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Single subscription - show directly
         client_id = client_ids[0]
         is_admin_user = (tg_id == ADMIN_TELEGRAM_ID)
-        usage_msg = await get_client_usage_for_display(client_id, is_admin_user, tg_id)
-
-        data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-        clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
-        username = clients[0].get("name", "Unknown") if clients else "Unknown"
+        usage_msg, client = await get_client_usage_record(client_id, is_admin_user, tg_id)
+        username = client.get("name", "Unknown") if client else "Unknown"
         web_panel_url = web_panel_url_for(username)
 
         await update.message.reply_text(usage_msg, reply_markup=subscription_keyboard(tg_id, client_id, web_panel_url))
@@ -1738,19 +1953,32 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-async def get_client_usage_for_display(client_id: int, is_admin: bool, user_id: int | None = None) -> str:
+async def get_client_usage_record(
+    client_id: int,
+    is_admin: bool,
+    user_id: int | None = None,
+) -> tuple[str, dict | None]:
     try:
         data = await api_client.get('apiv2/clients', {'id': client_id})
         if not data:
-            return "❌ Server unresponsive. Try Again Later."
-        clients = data.get("obj", {}).get("clients", [])
+            return "❌ Server unresponsive. Try Again Later.", None
+        clients = sui_clients(data)
+        if clients is None:
+            return "❌ Invalid response from server. Try Again Later.", None
         if not clients:
-            return "❌ User Not Found."
+            return "❌ User Not Found.", None
         client = clients[0]
-        return format_client(client, is_admin=is_admin, user_id=user_id)
+        if not isinstance(client, dict):
+            return "❌ Invalid response from server. Try Again Later.", None
+        return format_client(client, is_admin=is_admin, user_id=user_id), client
     except Exception as e:
-        logger.exception("Error in get_client_usage_for_display")
-        return f"❌ Error: {e}"
+        logger.exception("Error in get_client_usage_record")
+        return f"❌ Error: {e}", None
+
+
+async def get_client_usage_for_display(client_id: int, is_admin: bool, user_id: int | None = None) -> str:
+    message, _ = await get_client_usage_record(client_id, is_admin, user_id)
+    return message
 
 @rate_limited(admin_only=True)
 async def metrics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2151,11 +2379,12 @@ async def edit_user_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return EDIT_USER_GET_ID
 
     data = await api_client.get('apiv2/clients', {'id': client_id})
-    if not data or not data.get("obj", {}).get("clients"):
+    clients = sui_clients(data)
+    if not clients:
         await update.message.reply_text("❌ User With This Client ID Not Found:")
         return EDIT_USER_GET_ID
 
-    client = data["obj"]["clients"][0]
+    client = clients[0]
     context.user_data['editing_client_id'] = client_id
     context.user_data['original_client_data'] = client.copy()
 
@@ -2561,11 +2790,12 @@ async def delete_user_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DELETE_USER_GET_ID
 
     data = await api_client.get('apiv2/clients', {'id': client_id})
-    if not data or not data.get("obj", {}).get("clients"):
+    clients = sui_clients(data)
+    if not clients:
         await update.message.reply_text("❌ User With This Client ID Not Found:")
         return DELETE_USER_GET_ID
 
-    client = data["obj"]["clients"][0]
+    client = clients[0]
     client_name = client.get('name', 'Unknown')
     context.user_data['client_id_to_delete'] = client_id
     context.user_data['client_name_to_delete'] = client_name
@@ -2670,6 +2900,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_text(),
                 reply_markup=build_settings_menu_keyboard()
             )
+        elif data == 'settings_payments':
+            await query.edit_message_text(
+                build_payment_settings_text(), reply_markup=build_payment_settings_keyboard()
+            )
+        elif data == 'settings_admin_tools':
+            await query.edit_message_text(
+                build_admin_tools_settings_text(), reply_markup=build_admin_tools_settings_keyboard()
+            )
         elif data == 'settings_connection_guides':
             await query.edit_message_text(
                 build_connection_guides_admin_text(user_id),
@@ -2699,6 +2937,51 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 tr(user_id, "guide_choose_delete"),
                 reply_markup=InlineKeyboardMarkup(rows),
+            )
+        elif data == 'settings_guides_edit':
+            rows = [[InlineKeyboardButton(
+                preserve_dynamic_text(guide["title"]), callback_data=f"settings_guides_edit_{guide['id']}"
+            )] for guide in connection_guide_store.list_guides()]
+            rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="settings_connection_guides")])
+            await query.edit_message_text(tr(user_id, "guide_choose_edit"), reply_markup=InlineKeyboardMarkup(rows))
+        elif data.startswith('settings_guides_item_delete_'):
+            payload = data.removeprefix('settings_guides_item_delete_')
+            guide_id, raw_index = payload.rsplit('_', 1)
+            try:
+                deleted = await asyncio.to_thread(connection_guide_store.delete_message, guide_id, int(raw_index))
+            except ValueError:
+                await localized_query_answer(query, tr(user_id, "guide_cannot_delete_last"), show_alert=True)
+                return
+            guide = connection_guide_store.get(guide_id)
+            if not deleted or guide is None:
+                await localized_query_answer(query, tr(user_id, "guide_unavailable"), show_alert=True)
+                return
+            await query.edit_message_text(
+                build_connection_guide_edit_text(user_id, guide),
+                reply_markup=build_connection_guide_edit_keyboard(user_id, guide),
+            )
+            await localized_query_answer(query, tr(user_id, "guide_item_deleted"), show_alert=True)
+        elif data.startswith('settings_guides_item_'):
+            payload = data.removeprefix('settings_guides_item_')
+            guide_id, raw_index = payload.rsplit('_', 1)
+            guide = connection_guide_store.get(guide_id)
+            index = int(raw_index)
+            if guide is None or not 0 <= index < len(guide["messages"]):
+                await localized_query_answer(query, tr(user_id, "guide_unavailable"), show_alert=True)
+                return
+            await query.edit_message_text(
+                guide_item_label(index, guide["messages"][index]),
+                reply_markup=build_connection_guide_item_keyboard(user_id, guide_id, index),
+            )
+        elif data.startswith('settings_guides_edit_'):
+            guide_id = data.removeprefix('settings_guides_edit_')
+            guide = connection_guide_store.get(guide_id)
+            if guide is None:
+                await localized_query_answer(query, tr(user_id, "guide_unavailable"), show_alert=True)
+                return
+            await query.edit_message_text(
+                build_connection_guide_edit_text(user_id, guide),
+                reply_markup=build_connection_guide_edit_keyboard(user_id, guide),
             )
         elif data.startswith('settings_guides_delete_confirm_'):
             guide_id = data.removeprefix('settings_guides_delete_confirm_')
@@ -2732,8 +3015,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 WEB_PANEL_ENABLED = False
                 save_runtime_setting("WEB_PANEL_ENABLED", "false", RUNTIME_SETTINGS_FILE)
                 await query.edit_message_text(
-                    build_settings_menu_text(),
-                    reply_markup=build_settings_menu_keyboard(),
+                    build_admin_tools_settings_text(),
+                    reply_markup=build_admin_tools_settings_keyboard(),
                 )
                 await localized_query_answer(query, tr(user_id, "web_panel_disabled_notice"), show_alert=True)
             else:
@@ -2744,7 +3027,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             tr(user_id, "confirm_enable_web_panel"),
                             callback_data='settings_web_panel_confirm',
                         )],
-                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='admin_settings')],
+                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='settings_admin_tools')],
                     ]),
                 )
         elif data == 'settings_web_panel_confirm':
@@ -2754,8 +3037,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WEB_PANEL_ENABLED = True
             save_runtime_setting("WEB_PANEL_ENABLED", "true", RUNTIME_SETTINGS_FILE)
             await query.edit_message_text(
-                build_settings_menu_text(),
-                reply_markup=build_settings_menu_keyboard(),
+                build_admin_tools_settings_text(),
+                reply_markup=build_admin_tools_settings_keyboard(),
             )
             notice_key = "web_panel_enabled_notice" if WEB_PANEL_BASE_URL else "web_panel_pending_notice"
             await localized_query_answer(query, tr(user_id, notice_key), show_alert=True)
@@ -2767,8 +3050,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 HIDE_SUBSCRIPTION_PORT = False
                 save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", RUNTIME_SETTINGS_FILE)
                 await query.edit_message_text(
-                    build_settings_menu_text(),
-                    reply_markup=build_settings_menu_keyboard(),
+                    build_admin_tools_settings_text(),
+                    reply_markup=build_admin_tools_settings_keyboard(),
                 )
                 await localized_query_answer(query, tr(user_id, "subscription_port_restored"), show_alert=True)
             else:
@@ -2779,7 +3062,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             tr(user_id, "confirm_remove_subscription_port"),
                             callback_data='settings_subscription_port_confirm',
                         )],
-                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='admin_settings')],
+                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='settings_admin_tools')],
                     ]),
                 )
         elif data == 'settings_subscription_port_confirm':
@@ -2789,8 +3072,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             HIDE_SUBSCRIPTION_PORT = True
             save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", RUNTIME_SETTINGS_FILE)
             await query.edit_message_text(
-                build_settings_menu_text(),
-                reply_markup=build_settings_menu_keyboard(),
+                build_admin_tools_settings_text(),
+                reply_markup=build_admin_tools_settings_keyboard(),
             )
             await localized_query_answer(query, tr(user_id, "subscription_port_removed"), show_alert=True)
         elif data == 'settings_backup_restore':
@@ -2865,8 +3148,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             set_renewal_month_options([1, 2, 3])
             await query.edit_message_text(
-                build_settings_menu_text(),
-                reply_markup=build_settings_menu_keyboard()
+                build_payment_settings_text(),
+                reply_markup=build_payment_settings_keyboard()
             )
             await localized_query_answer(query, "✅ Renewal plans reset to 1,2,3 months.", show_alert=True)
         elif data.startswith('settings_plan_toggle_'):
@@ -2914,8 +3197,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RENEWAL_MONTHLY_PRICE = new_price
             save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(RENEWAL_MONTHLY_PRICE), RUNTIME_SETTINGS_FILE)
             await query.edit_message_text(
-                build_settings_menu_text(),
-                reply_markup=build_settings_menu_keyboard()
+                build_payment_settings_text(),
+                reply_markup=build_payment_settings_keyboard()
             )
             await localized_query_answer(query, f"✅ New monthly price: {RENEWAL_MONTHLY_PRICE:,}", show_alert=False)
         elif data == 'create_user_prompt':
@@ -2957,12 +3240,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                     return
                 is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-                new_usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
-
-                # Get web panel URL
-                data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-                clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
-                username = clients[0].get("name", "Unknown") if clients else "Unknown"
+                new_usage_msg, client = await get_client_usage_record(client_id, is_admin_user, user_id)
+                username = client.get("name", "Unknown") if client else "Unknown"
                 web_panel_url = web_panel_url_for(username)
 
                 new_reply_markup = subscription_keyboard(user_id, client_id, web_panel_url)
@@ -2985,12 +3264,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Single subscription - show directly
                         client_id = client_ids[0]
                         is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-                        usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
-
-                        # Get web panel URL
-                        data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-                        clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
-                        username = clients[0].get("name", "Unknown") if clients else "Unknown"
+                        usage_msg, client = await get_client_usage_record(client_id, is_admin_user, user_id)
+                        username = client.get("name", "Unknown") if client else "Unknown"
                         web_panel_url = web_panel_url_for(username)
 
                         await query.edit_message_text(
@@ -3043,7 +3318,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not data_obj:
                 await query.edit_message_text("❌ Server Unresponsive")
                 return
-            clients = data_obj.get("obj", {}).get("clients", [])
+            clients = sui_clients(data_obj)
+            if clients is None:
+                await query.edit_message_text("❌ Invalid response from server")
+                return
             client_to_tg = build_client_to_tg_index()
             if not clients:
                 await query.edit_message_text("❌ User Not Found")
@@ -3073,12 +3351,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await localized_query_answer(query, "❌ You don't have access to this subscription.", show_alert=True)
                 return
             is_admin_user = (user_id == ADMIN_TELEGRAM_ID)
-            usage_msg = await get_client_usage_for_display(client_id, is_admin_user, user_id)
-
-            # Get web panel URL
-            data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-            clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
-            username = clients[0].get("name", "Unknown") if clients else "Unknown"
+            usage_msg, client = await get_client_usage_record(client_id, is_admin_user, user_id)
+            username = client.get("name", "Unknown") if client else "Unknown"
             web_panel_url = web_panel_url_for(username)
 
             await query.edit_message_text(
@@ -3172,7 +3446,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_tg_id = req["user_tg_id"]
             amount = req["amount"]
             data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-            clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
+            clients = sui_clients(data_obj)
+            if clients is None:
+                pending_renew_requests[request_id] = req
+                await localized_query_answer(query, "❌ Server unavailable. Try again.", show_alert=True)
+                return
             if not clients:
                 pending_renew_requests[request_id] = req
                 await localized_query_answer(query, "❌ Client not found on server.", show_alert=True)
@@ -3344,10 +3622,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await localized_query_answer(query, "❌ Only admin", show_alert=True)
                 return
             data_obj = await api_client.get('apiv2/status', {'r': 'cpu,mem,net,sys,sbd,dsk,swp,dio,db'})
-            if not data_obj:
-                await query.edit_message_text("❌ Failed To Get Server Stats.")
+            obj = sui_response_object(data_obj)
+            if obj is None:
+                await query.edit_message_text(preserve_dynamic_text("❌ Failed To Get Server Stats."))
                 return
-            obj = data_obj.get("obj", {})
 
             # CPU
             cpu_percent = round(obj.get("cpu", 0))
@@ -3487,11 +3765,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for ip in ipv6:
                 msg += f"  • {ip}\n"
 
-            keyboard = [
-                [InlineKeyboardButton("🔄 Refresh", callback_data='server_status')],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')]
-            ]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(
+                preserve_dynamic_text(msg),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(preserve_dynamic_text("🔄 Refresh"), callback_data='server_status')],
+                    [InlineKeyboardButton(preserve_dynamic_text("🏠 Main Menu"), callback_data='main_menu')],
+                ]),
+            )
         elif data == 'bot_stats':
             if user_id != ADMIN_TELEGRAM_ID:
                 await localized_query_answer(query, "❌ Only admin", show_alert=True)
@@ -3792,7 +4072,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Failed To Get Users List.")
                 return
 
-            clients = data_obj.get("obj", {}).get("clients", [])
+            clients = sui_clients(data_obj)
+            if clients is None:
+                await query.edit_message_text("❌ Failed To Get Users List.")
+                return
             client_to_tg = build_client_to_tg_index()
 
             users_with_expiry = []
@@ -4073,7 +4356,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
     client_name = "Unknown"
     try:
         data_obj = await api_client.get('apiv2/clients', {'id': client_id})
-        clients = data_obj.get("obj", {}).get("clients", []) if data_obj else []
+        clients = sui_clients(data_obj) or []
         if clients:
             raw_desc = clients[0].get("desc")
             raw_name = clients[0].get("name")
@@ -4140,7 +4423,11 @@ async def daily_subscription_reminder(app):
                 await asyncio.sleep(3600)
                 continue
 
-            clients = data.get("obj", {}).get("clients", [])
+            clients = sui_clients(data)
+            if clients is None:
+                logger.error("Malformed clients response received by reminder task")
+                await asyncio.sleep(3600)
+                continue
             client_to_tg = build_client_to_tg_index()
             users_with_expiry, users_without_link = expiring_clients_with_assignments(clients, client_to_tg)
 
@@ -4273,7 +4560,11 @@ async def monitor_expired_subscriptions(app):
                 await asyncio.sleep(300)
                 continue
 
-            clients = data.get("obj", {}).get("clients", [])
+            clients = sui_clients(data)
+            if clients is None:
+                logger.error("Malformed clients response received by expiration monitor")
+                await asyncio.sleep(300)
+                continue
             client_to_tg = build_client_to_tg_index()
             now = datetime.now(timezone.utc)
 
@@ -4513,6 +4804,7 @@ async def daily_backup(app):
                 if content_length is not None and content_length > BACKUP_MAX_BYTES:
                     raise BackupTooLargeError(f"Backup exceeds {format_bytes(BACKUP_MAX_BYTES)}")
                 file_size = await stream_response_to_file(response, Path(filepath), BACKUP_MAX_BYTES)
+            await asyncio.to_thread(validate_sqlite_database, Path(filepath))
             logger.info(f"Backup saved: {filepath} ({format_bytes(file_size)})")
             await app.bot.send_document(
                 chat_id=ADMIN_TELEGRAM_ID,
@@ -4556,7 +4848,11 @@ async def cleanup_deleted_clients(app):
                 await asyncio.sleep(3600)
                 continue
 
-            existing_clients = data.get("obj", {}).get("clients", [])
+            existing_clients = sui_clients(data)
+            if existing_clients is None:
+                logger.error("Malformed clients response received by cleanup task; no assignments changed")
+                await asyncio.sleep(3600)
+                continue
             existing_client_ids = {client.get("id") for client in existing_clients if client.get("id")}
 
             unlinked_count = 0
@@ -5116,7 +5412,13 @@ async def main():
     )
 
     connection_guide_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(connection_guide_add_start, pattern='^settings_guides_add$')],
+        entry_points=[
+            CallbackQueryHandler(connection_guide_add_start, pattern='^settings_guides_add$'),
+            CallbackQueryHandler(
+                connection_guide_edit_start,
+                pattern='^settings_guides_(title|replace|append)_',
+            ),
+        ],
         states={
             CONNECTION_GUIDE_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, connection_guide_title_input)],
             CONNECTION_GUIDE_CONTENT: [
@@ -5124,6 +5426,11 @@ async def main():
                 CommandHandler('cancel', connection_guide_cancel),
                 MessageHandler(filters.ALL, connection_guide_content_input),
             ],
+            CONNECTION_GUIDE_EDIT_TITLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, connection_guide_edit_title_input),
+            ],
+            CONNECTION_GUIDE_EDIT_ITEM: [MessageHandler(filters.ALL & ~filters.COMMAND, connection_guide_edit_item_input)],
+            CONNECTION_GUIDE_APPEND_ITEM: [MessageHandler(filters.ALL & ~filters.COMMAND, connection_guide_edit_item_input)],
         },
         fallbacks=[CommandHandler('cancel', connection_guide_cancel)],
         allow_reentry=True,

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from sui_bot.connection_guides import ConnectionGuideStore, validate_guide_data
+from sui_bot.connection_guides import ConnectionGuideStore, split_guide_text, validate_guide_data
 
 
 def test_connection_guides_round_trip_and_toggle(tmp_path) -> None:
@@ -39,3 +39,29 @@ def test_connection_guide_validation_rejects_unknown_fields() -> None:
                 "messages": [{"type": "text", "text": "Hello", "unsafe": True}],
             }],
         })
+
+
+def test_connection_guide_items_can_be_edited_without_recreating_guide(tmp_path) -> None:
+    store = ConnectionGuideStore(tmp_path / "connection_guides.json")
+    guide_id = store.add("Android", [{"type": "text", "text": "Old app"}])
+
+    assert store.update_title(guide_id, "Android & TV")
+    assert store.replace_message(guide_id, 0, {"type": "text", "text": "New app"})
+    assert store.append_message(guide_id, {"type": "video", "file_id": "new-video", "caption": "Watch"})
+    assert store.delete_message(guide_id, 0)
+
+    guide = ConnectionGuideStore(store.path).get(guide_id)
+    assert guide["title"] == "Android & TV"
+    assert guide["messages"] == [{"type": "video", "file_id": "new-video", "caption": "Watch"}]
+    with pytest.raises(ValueError, match="retain at least one"):
+        store.delete_message(guide_id, 0)
+
+
+def test_long_guide_text_is_split_losslessly_for_telegram() -> None:
+    text = ("first line\n" * 500) + ("x" * 4096) + "\nlast"
+    chunks = split_guide_text(text)
+    assert "".join(chunks) == text
+    assert all(1 <= len(chunk) <= 4096 for chunk in chunks)
+    boundary_chunks = split_guide_text(("x" * 4096) + "\nlast")
+    assert "".join(boundary_chunks) == ("x" * 4096) + "\nlast"
+    assert all(len(chunk) <= 4096 for chunk in boundary_chunks)
