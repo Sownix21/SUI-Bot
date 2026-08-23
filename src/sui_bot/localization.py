@@ -46,6 +46,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "upload": "📤 Upload", "download": "📥 Download", "total_usage": "📊 Total Usage",
         "total_volume": "💾 Total Volume", "expiry": "⏰ Expiry", "unlimited": "♾️ Unlimited",
         "user": "👤 User", "description": "📝 Description", "group": "👥 Group",
+        "remark": "🏷️ Remark", "created_at": "🗓️ Created", "last_online": "🟢 Last Online", "never": "Never",
     },
     "fa": {
         "choose_language": "🌐 زبان دلخواه خود را انتخاب کنید:", "language_saved": "✅ زبان ذخیره شد.",
@@ -65,6 +66,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status": "وضعیت", "enabled": "✅ فعال", "disabled": "❌ غیرفعال", "upload": "📤 آپلود",
         "download": "📥 دانلود", "total_usage": "📊 مصرف کل", "total_volume": "💾 حجم کل",
         "expiry": "⏰ انقضا", "unlimited": "♾️ نامحدود", "user": "👤 کاربر", "description": "📝 توضیحات", "group": "👥 گروه",
+        "remark": "🏷️ یادداشت", "created_at": "🗓️ زمان ایجاد", "last_online": "🟢 آخرین فعالیت", "never": "هرگز",
     },
     "ru": {
         "choose_language": "🌐 Выберите предпочитаемый язык:", "language_saved": "✅ Язык сохранён.",
@@ -84,6 +86,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "disabled": "❌ Отключена", "upload": "📤 Отправлено", "download": "📥 Получено",
         "total_usage": "📊 Всего использовано", "total_volume": "💾 Общий объём", "expiry": "⏰ Срок",
         "unlimited": "♾️ Без ограничений", "user": "👤 Пользователь", "description": "📝 Описание", "group": "👥 Группа",
+        "remark": "🏷️ Примечание", "created_at": "🗓️ Создан", "last_online": "🟢 Последняя активность", "never": "Никогда",
     },
     "zh": {
         "choose_language": "🌐 请选择您的首选语言：", "language_saved": "✅ 语言已保存。",
@@ -100,6 +103,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status": "状态", "enabled": "✅ 已启用", "disabled": "❌ 已禁用", "upload": "📤 上传",
         "download": "📥 下载", "total_usage": "📊 总用量", "total_volume": "💾 总流量", "expiry": "⏰ 到期",
         "unlimited": "♾️ 无限制", "user": "👤 用户", "description": "📝 描述", "group": "👥 分组",
+        "remark": "🏷️ 备注", "created_at": "🗓️ 创建时间", "last_online": "🟢 最后在线", "never": "从未",
     },
 }
 

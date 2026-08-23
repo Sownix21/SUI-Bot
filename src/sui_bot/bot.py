@@ -1133,6 +1133,21 @@ def rate_limited(admin_only=False, track_metrics=True):
         return wrapper
     return decorator
 
+
+def format_client_timestamp(value: object) -> str | None:
+    """Format an S-UI Unix timestamp in an unambiguous administrator view."""
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if timestamp <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 def format_client(client: dict, is_admin: bool = False, user_id: int | None = None) -> str:
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
     name = preserve_dynamic_text(client["name"]) if client.get("name") else "Unknown"
@@ -1160,8 +1175,14 @@ def format_client(client: dict, is_admin: bool = False, user_id: int | None = No
     if is_admin:
         description = preserve_dynamic_text(client["desc"]) if client.get("desc") else "N/A"
         group = preserve_dynamic_text(client["group"]) if client.get("group") else "N/A"
+        remark = preserve_dynamic_text(client["remark"]) if client.get("remark") else "N/A"
+        created_at = format_client_timestamp(client.get("createdAt")) or "N/A"
+        last_online = format_client_timestamp(client.get("onlineAt")) or tr(uid, "never")
         lines.append(f"{tr(uid, 'description')}: {description}")
         lines.append(f"{tr(uid, 'group')}: {group}")
+        lines.append(f"{tr(uid, 'remark')}: {remark}")
+        lines.append(f"{tr(uid, 'created_at')}: {preserve_dynamic_text(created_at)}")
+        lines.append(f"{tr(uid, 'last_online')}: {preserve_dynamic_text(last_online)}")
 
     return "\n".join(lines)
 

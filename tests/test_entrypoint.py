@@ -216,7 +216,8 @@ def test_status_response_envelope_is_validated(tmp_path) -> None:
 import asyncio
 from unittest.mock import AsyncMock, patch
 import sui_bot.bot as bot
-from sui_bot.bot import APIClient, get_client_usage_record, sui_clients, sui_response_object
+from sui_bot.bot import APIClient, format_client, format_client_timestamp, get_client_usage_record, sui_clients, sui_response_object
+from sui_bot.outgoing_localization import localize_outgoing_text
 
 status = {
     "success": True,
@@ -240,6 +241,7 @@ assert sui_response_object(None) is None
 clients_response = {"success": True, "msg": "", "obj": {"clients": [{
     "id": 7, "name": "alice", "enable": True, "up": 10, "down": 20,
     "volume": 100, "expiry": 0, "desc": "Home", "group": "Family",
+    "remark": "priority client", "createdAt": 1704067200, "onlineAt": 1704153600,
 }]}}
 assert sui_clients(clients_response) == clients_response["obj"]["clients"]
 assert sui_clients({"success": True, "msg": "", "obj": {"clients": [None]}}) is None
@@ -268,10 +270,17 @@ async def check_api_failures_and_request_count():
     assert await client.get("apiv2/clients") is None
 
     with patch.object(bot.api_client, "get", new=AsyncMock(return_value=clients_response)) as getter:
-        message, record = await get_client_usage_record(7, False, 10)
+        message, record = await get_client_usage_record(7, True, 123456)
         assert message
         assert record["id"] == 7
         assert record["name"] == "alice"
+        rendered = localize_outgoing_text("en", message)
+        assert "Remark: priority client" in rendered
+        assert "Created: 2024-01-01 00:00:00 UTC" in rendered
+        assert "Last Online: 2024-01-02 00:00:00 UTC" in rendered
+        regular_user = localize_outgoing_text("en", format_client(record, is_admin=False, user_id=10))
+        assert "Remark:" not in regular_user and "Last Online:" not in regular_user
+        assert format_client_timestamp(0) is None
         getter.assert_awaited_once_with("apiv2/clients", {"id": 7})
 
 asyncio.run(check_api_failures_and_request_count())
