@@ -15,6 +15,7 @@ dependencies = [
   "python-dotenv>=1,<2",
   "python-telegram-bot>=22,<23",
   "redis>=6,<8",
+  "tzdata>=2024.1; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]

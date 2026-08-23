@@ -12,6 +12,7 @@ import string
 import uuid
 import html
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from functools import wraps
 from typing import Optional, Any, List
 import logging
@@ -21,7 +22,15 @@ from pathlib import Path
 
 import aiohttp
 import psutil
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestUsers,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, ExtBot, MessageHandler, filters
 from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.helpers import escape_markdown
@@ -124,6 +133,8 @@ RENEWAL_MONTH_OPTIONS = str(RUNTIME_SETTINGS.get("RENEWAL_MONTH_OPTIONS", SETTIN
 PAYMENT_CARD_NUMBER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
 PAYMENT_CARD_HOLDER = str(RUNTIME_SETTINGS.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
 BOT_DISPLAY_NAME = validate_display_name(RUNTIME_SETTINGS.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
+ADMIN_TIMEZONE = str(RUNTIME_SETTINGS.get("ADMIN_TIMEZONE", "UTC")).upper()
+PAYMENT_CURRENCY = str(RUNTIME_SETTINGS.get("PAYMENT_CURRENCY", "TOMAN")).upper()
 WEB_PANEL_BASE_URL = SETTINGS.web_panel_base_url
 WEB_PANEL_ENABLED = str(RUNTIME_SETTINGS.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
     "1", "true", "yes", "on"
@@ -151,6 +162,7 @@ MIN_USERNAME_LEN = 3
 MAX_USERNAME_LEN = 32
 MAX_DESC_LEN = 120
 MAX_GROUP_LEN = 64
+MAX_REMARK_LEN = 120
 MAX_BROADCAST_LEN = 2000
 MAX_CALLBACK_DATA_LEN = 64
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -182,6 +194,26 @@ SETTINGS_CARD_NUMBER, SETTINGS_CARD_HOLDER, SETTINGS_DISPLAY_NAME = range(19, 22
 RESTORE_BACKUP_FILE = 22
 CONNECTION_GUIDE_TITLE, CONNECTION_GUIDE_CONTENT = range(23, 25)
 CONNECTION_GUIDE_EDIT_TITLE, CONNECTION_GUIDE_EDIT_ITEM, CONNECTION_GUIDE_APPEND_ITEM = range(25, 28)
+CREATE_USER_REMARK, CREATE_USER_LIFECYCLE, CREATE_USER_RESET_DAYS = range(28, 31)
+EDIT_USER_REMARK, EDIT_USER_LIFECYCLE, EDIT_USER_RESET_DAYS = range(31, 34)
+SETTINGS_MONTHLY_PRICE = 34
+
+ADMIN_TIMEZONES = {
+    "UTC": ("UTC", "UTC / Global"),
+    "IRAN": ("Asia/Tehran", "Iran"),
+    "CHINA": ("Asia/Shanghai", "China"),
+    "RUSSIA": ("Europe/Moscow", "Russia (Moscow)"),
+}
+PAYMENT_CURRENCIES = {
+    "TOMAN": "Iranian toman (TOMAN)",
+    "USD": "US dollar (USD)",
+    "CNY": "Chinese yuan (CNY)",
+    "RUB": "Russian ruble (RUB)",
+}
+if ADMIN_TIMEZONE not in ADMIN_TIMEZONES:
+    ADMIN_TIMEZONE = "UTC"
+if PAYMENT_CURRENCY not in PAYMENT_CURRENCIES:
+    PAYMENT_CURRENCY = "TOMAN"
 
 _user_requests = {}
 _blocked_users = {}
@@ -726,6 +758,11 @@ def build_client_data_new(
     group: str,
     inbounds: List[int],
     enable: bool = True,
+    remark: str = "",
+    delay_start: bool = False,
+    auto_reset: bool = False,
+    reset_days: int = 0,
+    next_reset: int = 0,
 ) -> dict:
     return {
         "enable": enable,
@@ -739,11 +776,11 @@ def build_client_data_new(
         "down": 0,
         "desc": desc,
         "group": group,
-        "remark": "",
-        "delayStart": False,
-        "autoReset": False,
-        "resetDays": 0,
-        "nextReset": 0,
+        "remark": remark,
+        "delayStart": delay_start,
+        "autoReset": auto_reset,
+        "resetDays": reset_days if reset_days > 0 else 0,
+        "nextReset": next_reset if next_reset > 0 else 0,
         "totalUp": 0,
         "totalDown": 0,
         "createdAt": 0,
@@ -761,6 +798,11 @@ def build_client_data_edit(
     enable: bool = True,
     regenerate_secrets: bool = False,
     original_client: Optional[dict] = None,
+    remark: Optional[str] = None,
+    delay_start: Optional[bool] = None,
+    auto_reset: Optional[bool] = None,
+    reset_days: Optional[int] = None,
+    next_reset: Optional[int] = None,
 ) -> dict:
     edited = {
         "id": client_id,
@@ -816,7 +858,32 @@ def build_client_data_edit(
         edited["config"] = cfg
     else:
         edited["config"] = {}
+    if remark is not None:
+        edited["remark"] = remark
+    if delay_start is not None:
+        edited["delayStart"] = delay_start
+    if auto_reset is not None:
+        edited["autoReset"] = auto_reset
+    if reset_days is not None:
+        edited["resetDays"] = max(0, reset_days)
+    if next_reset is not None:
+        edited["nextReset"] = max(0, next_reset)
     return edited
+
+
+def build_client_renewal_data(original_client: dict, client_id: int, new_expiry: int) -> dict:
+    """Build a renewal edit while resetting current and accumulated traffic."""
+    renewed = json.loads(json.dumps(original_client))
+    renewed.update({
+        "id": client_id,
+        "expiry": new_expiry,
+        "enable": True,
+        "up": 0,
+        "down": 0,
+        "totalUp": 0,
+        "totalDown": 0,
+    })
+    return renewed
 
 # Backward-compatible alias for existing call sites.
 def build_client_data(
@@ -1135,7 +1202,7 @@ def rate_limited(admin_only=False, track_metrics=True):
 
 
 def format_client_timestamp(value: object) -> str | None:
-    """Format an S-UI Unix timestamp in an unambiguous administrator view."""
+    """Format an S-UI Unix timestamp in the administrator's selected zone."""
     try:
         timestamp = int(value)
     except (TypeError, ValueError, OverflowError):
@@ -1143,7 +1210,11 @@ def format_client_timestamp(value: object) -> str | None:
     if timestamp <= 0:
         return None
     try:
-        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        zone_name, _ = ADMIN_TIMEZONES[ADMIN_TIMEZONE]
+        local_time = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(ZoneInfo(zone_name))
+        offset = local_time.strftime("%z")
+        offset_text = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC"
+        return f"{local_time:%Y-%m-%d %H:%M:%S} {offset_text}"
     except (OSError, OverflowError, ValueError):
         return None
 
@@ -1271,6 +1342,14 @@ def cleanup_pending_renew_requests():
 def renewal_amount(months: int) -> int:
     return RENEWAL_MONTHLY_PRICE * months
 
+
+def format_money(amount: int) -> str:
+    return f"{amount:,} {PAYMENT_CURRENCY}"
+
+
+def payment_price_steps() -> tuple[int, int]:
+    return (10_000, 50_000) if PAYMENT_CURRENCY == "TOMAN" else (1, 10)
+
 def build_settings_menu_text() -> str:
     return (
         "⚙️ Admin Settings\n\n"
@@ -1287,7 +1366,8 @@ def build_payment_settings_text() -> str:
     card_number = preserve_dynamic_text(ltr_isolate(PAYMENT_CARD_NUMBER))
     return (
         f"{tr(ADMIN_TELEGRAM_ID, 'payments_and_renewal')}\n\n"
-        f"💰 Price Per Month: {RENEWAL_MONTHLY_PRICE:,} Tooman\n"
+        f"💰 Price Per Month: {format_money(RENEWAL_MONTHLY_PRICE)}\n"
+        f"🌍 Currency: {PAYMENT_CURRENCIES[PAYMENT_CURRENCY]}\n"
         f"📦 Enabled Renewal Options: {months_text}\n"
         f"🏦 Card Number: {card_number}{holder_line}"
     )
@@ -1309,6 +1389,7 @@ def build_admin_tools_settings_text() -> str:
     return (
         f"{tr(ADMIN_TELEGRAM_ID, 'administration')}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
+        f"🕐 Administrative Timezone: {ADMIN_TIMEZONES[ADMIN_TIMEZONE][1]}\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'subscription_link_mode')}: {port_status}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'web_panel_setting')}: {tr(ADMIN_TELEGRAM_ID, web_panel_status_key)}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'guide_admin_count')}: {len(connection_guide_store.list_guides())}"
@@ -1323,10 +1404,13 @@ def build_settings_menu_keyboard():
 
 
 def build_payment_settings_keyboard():
+    small_step, large_step = payment_price_steps()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Renewal Plans", callback_data='settings_plans')],
-        [InlineKeyboardButton("➖ 10K", callback_data='settings_price_minus_10000'), InlineKeyboardButton("➕ 10K", callback_data='settings_price_plus_10000')],
-        [InlineKeyboardButton("➖ 50K", callback_data='settings_price_minus_50000'), InlineKeyboardButton("➕ 50K", callback_data='settings_price_plus_50000')],
+        [InlineKeyboardButton(f"➖ {small_step:,}", callback_data=f'settings_price_minus_{small_step}'), InlineKeyboardButton(f"➕ {small_step:,}", callback_data=f'settings_price_plus_{small_step}')],
+        [InlineKeyboardButton(f"➖ {large_step:,}", callback_data=f'settings_price_minus_{large_step}'), InlineKeyboardButton(f"➕ {large_step:,}", callback_data=f'settings_price_plus_{large_step}')],
+        [InlineKeyboardButton("🌍 Set Currency", callback_data='settings_currency')],
+        [InlineKeyboardButton("💰 Set Exact Monthly Price", callback_data='settings_set_monthly_price')],
         [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
         [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
         [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
@@ -1337,6 +1421,7 @@ def build_payment_settings_keyboard():
 def build_admin_tools_settings_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
+        [InlineKeyboardButton("🕐 Set Administrative Timezone", callback_data='settings_timezone')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "connection_guides_title"), callback_data='settings_connection_guides')],
         [InlineKeyboardButton(
             tr(
@@ -1451,6 +1536,8 @@ def backup_configuration_summary() -> dict[str, Any]:
         "rate_limit_window": RATE_LIMIT_WINDOW,
         "max_requests_per_window": MAX_REQUESTS_PER_WINDOW,
         "bot_display_name": BOT_DISPLAY_NAME,
+        "admin_timezone": ADMIN_TIMEZONE,
+        "payment_currency": PAYMENT_CURRENCY,
         "secrets_included": False,
         "secret_notice": "BOT_TOKEN and SUI_TOKEN are intentionally excluded",
     }
@@ -1479,6 +1566,7 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
     global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED
+    global ADMIN_TIMEZONE, PAYMENT_CURRENCY
     global renewal_month_options
     load_assignments()
     language_store.load()
@@ -1500,6 +1588,10 @@ def reload_restored_state() -> None:
     WEB_PANEL_ENABLED = str(restored_settings.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
         "1", "true", "yes", "on"
     }
+    restored_timezone = str(restored_settings.get("ADMIN_TIMEZONE", "UTC")).upper()
+    ADMIN_TIMEZONE = restored_timezone if restored_timezone in ADMIN_TIMEZONES else "UTC"
+    restored_currency = str(restored_settings.get("PAYMENT_CURRENCY", "TOMAN")).upper()
+    PAYMENT_CURRENCY = restored_currency if restored_currency in PAYMENT_CURRENCIES else "TOMAN"
     renewal_month_options = parse_renewal_month_options(RENEWAL_MONTH_OPTIONS)
 
 @rate_limited(admin_only=True)
@@ -1583,6 +1675,15 @@ async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='settings_payments')]])
         )
         return SETTINGS_CARD_NUMBER
+
+    if query.data == "settings_set_monthly_price":
+        await query.edit_message_text(
+            f"💰 Enter the exact monthly price in {PAYMENT_CURRENCY}.\n"
+            "Use a whole positive number. Currency conversion is not automatic.\n\n"
+            "Cancel: /cancel",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='settings_payments')]])
+        )
+        return SETTINGS_MONTHLY_PRICE
 
     if query.data == "settings_set_card_holder":
         await query.edit_message_text(
@@ -1848,6 +1949,26 @@ async def finish_connection_guide_edit(update: Update, context: ContextTypes.DEF
         )
     return ConversationHandler.END
 
+
+async def settings_monthly_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global RENEWAL_MONTHLY_PRICE
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return ConversationHandler.END
+    try:
+        value = int(update.message.text.strip().replace(',', ''))
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 10**15:
+        await update.message.reply_text("❌ Enter a whole positive number (maximum 1,000,000,000,000,000).")
+        return SETTINGS_MONTHLY_PRICE
+    RENEWAL_MONTHLY_PRICE = value
+    save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(value), RUNTIME_SETTINGS_FILE)
+    await update.message.reply_text(
+        f"✅ Monthly price updated: {format_money(value)}",
+        reply_markup=build_payment_settings_keyboard(),
+    )
+    return ConversationHandler.END
+
 def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
     subscription_key = "my_subscriptions" if has_multiple_subscriptions(telegram_clients, uid) else "my_subscription"
@@ -2031,13 +2152,9 @@ async def assign(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ IDs Must Be a Positive Number.")
             return
 
-        # Get existing assignments or create new list
-        current_assignments = telegram_clients.get(tg_id, [])
-        if client_id not in current_assignments:
-            current_assignments.append(client_id)
-            telegram_clients[tg_id] = current_assignments
-            save_assignments()
-            await update.message.reply_text(f"✅ Client ID {client_id} added to Telegram ID {tg_id}. Total subscriptions: {len(current_assignments)}")
+        added, count = add_client_assignment(tg_id, client_id)
+        if added:
+            await update.message.reply_text(f"✅ Client ID {client_id} added to Telegram ID {tg_id}. Total subscriptions: {count}")
         else:
             await update.message.reply_text(f"⚠️ Client ID {client_id} already assigned to Telegram ID {tg_id}")
 
@@ -2049,6 +2166,109 @@ async def assign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Error in assign")
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+def add_client_assignment(telegram_id: int, client_id: int) -> tuple[bool, int]:
+    """Add one normalized assignment and persist it; return (added, total)."""
+    if telegram_id <= 0 or client_id <= 0:
+        raise ValueError("Telegram and client IDs must be positive")
+    existing = telegram_clients.get(telegram_id, [])
+    current = list(existing) if isinstance(existing, list) else [existing]
+    current = [int(value) for value in current if value is not None]
+    if client_id in current:
+        return False, len(current)
+    current.append(client_id)
+    telegram_clients[telegram_id] = current
+    save_assignments()
+    return True, len(current)
+
+
+def find_client_by_id(clients: List[dict], client_id: int) -> dict | None:
+    for client in clients:
+        try:
+            if int(client.get('id')) == client_id:
+                return client
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+async def show_interactive_assignment_clients(query, page: int = 1) -> None:
+    clients = await get_all_clients_list()
+    assigned_ids = {
+        int(client_id)
+        for assigned in telegram_clients.values()
+        for client_id in (assigned if isinstance(assigned, list) else [assigned])
+    }
+    available = []
+    for client in clients:
+        try:
+            client_id = int(client.get('id'))
+        except (TypeError, ValueError):
+            continue
+        if client_id > 0 and client_id not in assigned_ids:
+            available.append((client_id, client))
+    available.sort(key=lambda item: (str(item[1].get('name', '')).casefold(), item[0]))
+    total_pages = max(1, (len(available) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * ITEMS_PER_PAGE
+    rows = []
+    for client_id, client in available[start:start + ITEMS_PER_PAGE]:
+        name = str(client.get('name') or 'Unknown')
+        desc = str(client.get('desc') or '')
+        label = f"{name} — {desc}" if desc else name
+        if len(label) > 48:
+            label = f"{label[:45]}..."
+        rows.append([InlineKeyboardButton(preserve_dynamic_text(label), callback_data=f'assign_pick_{client_id}')])
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton("◀️", callback_data=f'assign_page_{page - 1}'))
+    navigation.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data='current_page'))
+    if page < total_pages:
+        navigation.append(InlineKeyboardButton("▶️", callback_data=f'assign_page_{page + 1}'))
+    rows.append(navigation)
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='add_link_help')])
+    message = (
+        "👤 Interactive Assignment\n\nChoose an unassigned S-UI client, then Telegram will open its native user picker."
+        if available else
+        "✅ Every S-UI client is already linked. Use /assign if you intentionally need to link one client to another account."
+    )
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def interactive_assign_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return
+    pending = context.user_data.get('pending_interactive_assignment')
+    shared = update.message.users_shared
+    if not isinstance(pending, dict) or shared is None or shared.request_id != pending.get('request_id'):
+        await update.message.reply_text("❌ This user selection is no longer active.", reply_markup=ReplyKeyboardRemove())
+        return
+    if len(shared.users) != 1:
+        await update.message.reply_text("❌ Select exactly one Telegram account.", reply_markup=ReplyKeyboardRemove())
+        return
+    selected = shared.users[0]
+    pending['telegram_id'] = int(selected.user_id)
+    full_name = " ".join(part for part in (selected.first_name, selected.last_name) if part)
+    pending['telegram_label'] = f"@{selected.username}" if selected.username else full_name or str(selected.user_id)
+    await update.message.reply_text("✅ Telegram account selected.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "🔗 Confirm Assignment\n\n"
+        f"S-UI client: {preserve_dynamic_text(pending['client_name'])} (ID: {pending['client_id']})\n"
+        f"Telegram: {preserve_dynamic_text(pending['telegram_label'])} (ID: {pending['telegram_id']})\n\n"
+        "The person must start the bot before it can send them messages.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm", callback_data='assign_confirm')],
+            [InlineKeyboardButton("❌ Cancel", callback_data='assign_abort')],
+        ]),
+    )
+
+
+async def interactive_assign_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return
+    context.user_data.pop('pending_interactive_assignment', None)
+    await update.message.reply_text("❌ Interactive assignment canceled.", reply_markup=ReplyKeyboardRemove())
 
 @rate_limited(admin_only=True)
 async def unlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2306,24 +2526,132 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Group must be at most {MAX_GROUP_LEN} characters.")
         return CREATE_USER_GROUP
     context.user_data['new_client_group'] = group
+    await update.message.reply_text(
+        f"✅ Group: {group}\n\n"
+        "🗒️ Enter an administrative remark.\n"
+        "This is separate from the user description. Send '.' for no remark.\n\n"
+        "Abort: /cancel"
+    )
+    return CREATE_USER_REMARK
+
+
+def lifecycle_keyboard(prefix: str, include_keep: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if include_keep:
+        rows.append([InlineKeyboardButton("🛡️ Keep Current Policy", callback_data=f'{prefix}_lifecycle_keep')])
+    rows.extend([
+        [InlineKeyboardButton("⏱️ Expiry Countdown Already Started", callback_data=f'{prefix}_lifecycle_regular')],
+        [InlineKeyboardButton("🚀 Start Expiry On First Connection", callback_data=f'{prefix}_lifecycle_delayed_expiry')],
+        [InlineKeyboardButton("🔁 Auto-reset Usage From Now", callback_data=f'{prefix}_lifecycle_reset_now')],
+        [InlineKeyboardButton("🔁 Auto-reset Usage From First Connection", callback_data=f'{prefix}_lifecycle_reset_first')],
+        [InlineKeyboardButton("❌ Abort", callback_data=f'{prefix}_cancel')],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def create_user_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remark = update.message.text.strip()
+    if remark == '.':
+        remark = ''
+    if len(remark) > MAX_REMARK_LEN:
+        await update.message.reply_text(f"❌ Remark must be at most {MAX_REMARK_LEN} characters.")
+        return CREATE_USER_REMARK
+    context.user_data['new_client_remark'] = remark
+    await update.message.reply_text(
+        "⚙️ Choose the expiry/reset policy.\n\n"
+        "Delayed expiry starts its countdown after the first successful VPN traffic. "
+        "Auto-reset clears current usage at the configured interval; historical totals remain tracked.",
+        reply_markup=lifecycle_keyboard('create'),
+    )
+    return CREATE_USER_LIFECYCLE
+
+
+async def create_user_lifecycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await localized_query_answer(query)
+    if query.data == 'create_cancel':
+        await query.edit_message_text("❌ Operation Aborted.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    policy = query.data.removeprefix('create_lifecycle_')
+    if policy == 'regular':
+        context.user_data.update(new_client_delay_start=False, new_client_auto_reset=False,
+                                 new_client_reset_days=0, new_client_next_reset=0)
+        return await finish_create_user(query, context)
+    if policy not in {'delayed_expiry', 'reset_now', 'reset_first'}:
+        return CREATE_USER_LIFECYCLE
+    context.user_data['new_client_policy'] = policy
+    prompt = (
+        "Enter the number of subscription days starting from first connection:"
+        if policy == 'delayed_expiry'
+        else "Enter the number of days between automatic usage resets:"
+    )
+    await query.edit_message_text(f"⚙️ {prompt}\n\nAbort: /cancel")
+    return CREATE_USER_RESET_DAYS
+
+
+async def create_user_reset_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+    except ValueError:
+        days = 0
+    if days <= 0 or days > 3650:
+        await update.message.reply_text("❌ Enter a whole number from 1 to 3650:")
+        return CREATE_USER_RESET_DAYS
+    policy = context.user_data['new_client_policy']
+    if policy == 'delayed_expiry':
+        context.user_data.update(new_client_expiry=0, new_client_delay_start=True,
+                                 new_client_auto_reset=False, new_client_reset_days=days,
+                                 new_client_next_reset=0)
+    else:
+        starts_on_first_connection = policy == 'reset_first'
+        next_reset = 0 if starts_on_first_connection else int(
+            (datetime.now(timezone.utc) + timedelta(days=days)).timestamp()
+        )
+        context.user_data.update(new_client_delay_start=starts_on_first_connection,
+                                 new_client_auto_reset=True, new_client_reset_days=days,
+                                 new_client_next_reset=next_reset)
+    return await finish_create_user(update.message, context)
+
+
+async def finish_create_user(message, context: ContextTypes.DEFAULT_TYPE):
     name = context.user_data['new_client_name']
     inbounds = context.user_data['selected_inbounds']
     volume = context.user_data['new_client_volume']
     expiry = context.user_data['new_client_expiry']
     desc = context.user_data['new_client_desc']
+    group = context.user_data['new_client_group']
+    remark = context.user_data.get('new_client_remark', '')
+    delay_start = context.user_data.get('new_client_delay_start', False)
+    auto_reset = context.user_data.get('new_client_auto_reset', False)
+    reset_days = context.user_data.get('new_client_reset_days', 0)
+    next_reset = context.user_data.get('new_client_next_reset', 0)
     volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
     expiry_str = "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
     selected_names = [get_inbound_display_name(i) for i in inbounds]
-    await update.message.reply_text(
+    policy_text = (
+        f"Delayed expiry ({reset_days} days from first connection)" if delay_start and not auto_reset
+        else f"Auto-reset every {reset_days} days ({'from first connection' if delay_start else 'from now'})"
+        if auto_reset else "Regular expiry"
+    )
+    progress_text = (
         "⏳ Creating User...\n\n"
         f"👤 Username: {name}\n"
         f"📡 Inbounds: {', '.join(selected_names)}\n"
         f"💾 Volume: {volume_str}\n"
         f"⏰ Expiry: {expiry_str}\n"
         f"📝 Description: {desc}\n"
-        f"👥 Group: {group}"
+        f"👥 Group: {group}\n"
+        f"🗒️ Remark: {remark or 'None'}\n"
+        f"⚙️ Policy: {policy_text}"
     )
-    client_data = build_client_data(
+    if hasattr(message, 'edit_message_text'):
+        await message.edit_message_text(progress_text)
+        reply_target = message.message
+    else:
+        await message.reply_text(progress_text)
+        reply_target = message
+    client_data = build_client_data_new(
         name=name,
         volume_bytes=volume,
         expiry_timestamp=expiry,
@@ -2331,26 +2659,33 @@ async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group=group,
         inbounds=inbounds,
         enable=True,
+        remark=remark,
+        delay_start=delay_start,
+        auto_reset=auto_reset,
+        reset_days=reset_days,
+        next_reset=next_reset,
     )
     result = await create_or_edit_client("new", client_data)
     if result and result.get('success'):
         global clients_cache, clients_cache_time
         clients_cache = None
         clients_cache_time = 0
-        await update.message.reply_text(
+        await reply_target.reply_text(
             "✅ User Created Successfully.\n\n"
             f"👤 Username: {name}\n"
             f"📡 Inbounds: {', '.join(selected_names)}\n"
             f"💾 Volume: {volume_str}\n"
             f"⏰ Expiry: {expiry_str}\n"
             f"📝 Description: {desc}\n"
-            f"👥 Group: {group}\n\n"
+            f"👥 Group: {group}\n"
+            f"🗒️ Remark: {remark or 'None'}\n"
+            f"⚙️ Policy: {policy_text}\n\n"
             "Main Menu: /start"
         )
     else:
         error_msg = result.get('msg', 'Unknown Error') if result else 'Server Unresponsive'
         error_msg = preserve_dynamic_text(error_msg)
-        await update.message.reply_text(
+        await reply_target.reply_text(
             f"❌ Failed To Create User:\n{error_msg}\n\n"
             "Try Again: /createuser"
         )
@@ -2416,6 +2751,11 @@ async def edit_user_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['edited_client_desc'] = client.get('desc')
     context.user_data['edited_client_group'] = client.get('group')
     context.user_data['edited_client_enable'] = client.get('enable', True)
+    context.user_data['edited_client_remark'] = client.get('remark', '')
+    context.user_data['edited_client_delay_start'] = bool(client.get('delayStart', False))
+    context.user_data['edited_client_auto_reset'] = bool(client.get('autoReset', False))
+    context.user_data['edited_client_reset_days'] = int(client.get('resetDays', 0) or 0)
+    context.user_data['edited_client_next_reset'] = int(client.get('nextReset', 0) or 0)
 
     current_name = context.user_data['edited_client_name']
     await update.message.reply_text(
@@ -2662,18 +3002,111 @@ async def edit_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return EDIT_USER_GROUP
     context.user_data['edited_client_group'] = group
 
+    current_remark = context.user_data.get('edited_client_remark', '')
+    await update.message.reply_text(
+        f"✅ Group: {group}\n\n"
+        "🗒️ Enter a new administrative remark.\n"
+        f"Current: {current_remark or 'empty'}\n"
+        "Send '.' to keep it or '-' to clear it.\n\n"
+        "Abort: /cancel"
+    )
+    return EDIT_USER_REMARK
+
+
+async def edit_user_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remark = update.message.text.strip()
+    if remark == '.':
+        remark = context.user_data.get('edited_client_remark', '')
+    elif remark == '-':
+        remark = ''
+    if len(remark) > MAX_REMARK_LEN:
+        await update.message.reply_text(f"❌ Remark must be at most {MAX_REMARK_LEN} characters.")
+        return EDIT_USER_REMARK
+    context.user_data['edited_client_remark'] = remark
+    current_policy = lifecycle_policy_text(
+        context.user_data['edited_client_delay_start'],
+        context.user_data['edited_client_auto_reset'],
+        context.user_data['edited_client_reset_days'],
+    )
+    await update.message.reply_text(
+        f"⚙️ Choose the expiry/reset policy.\n\nCurrent: {current_policy}",
+        reply_markup=lifecycle_keyboard('edit', include_keep=True),
+    )
+    return EDIT_USER_LIFECYCLE
+
+
+def lifecycle_policy_text(delay_start: bool, auto_reset: bool, reset_days: int) -> str:
+    if delay_start and not auto_reset:
+        return f"Delayed expiry: {reset_days} days from first connection"
+    if auto_reset:
+        origin = "first connection" if delay_start else "now/next scheduled reset"
+        return f"Auto-reset usage every {reset_days} days, starting from {origin}"
+    return "Regular expiry; no automatic usage reset"
+
+
+async def prompt_edit_enable(message, context: ContextTypes.DEFAULT_TYPE):
     current_enable_status = context.user_data['edited_client_enable']
     keyboard = [
         [InlineKeyboardButton(f"✅ Enable {'✅' if current_enable_status else ''}", callback_data='edit_enable_true')],
         [InlineKeyboardButton(f"❌ Disable {'✅' if not current_enable_status else ''}", callback_data='edit_enable_false')],
         [InlineKeyboardButton("❌ Abort", callback_data='edit_cancel')]
     ]
-    await update.message.reply_text(
-        f"✅ Group: {group}\n\n"
-        "⚡ Choose Active/Deactive State Of The User:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    text = "⚡ Choose Active/Deactive State Of The User:"
+    if hasattr(message, 'edit_message_text'):
+        await message.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return EDIT_USER_ENABLE
+
+
+async def edit_user_lifecycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await localized_query_answer(query)
+    if query.data == 'edit_cancel':
+        await query.edit_message_text("❌ Operation Aborted.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    policy = query.data.removeprefix('edit_lifecycle_')
+    if policy == 'keep':
+        return await prompt_edit_enable(query, context)
+    if policy == 'regular':
+        context.user_data.update(edited_client_delay_start=False, edited_client_auto_reset=False,
+                                 edited_client_reset_days=0, edited_client_next_reset=0)
+        return await prompt_edit_enable(query, context)
+    if policy not in {'delayed_expiry', 'reset_now', 'reset_first'}:
+        return EDIT_USER_LIFECYCLE
+    context.user_data['edited_client_policy'] = policy
+    prompt = (
+        "Enter the number of subscription days starting from first connection:"
+        if policy == 'delayed_expiry'
+        else "Enter the number of days between automatic usage resets:"
+    )
+    await query.edit_message_text(f"⚙️ {prompt}\n\nAbort: /cancel")
+    return EDIT_USER_RESET_DAYS
+
+
+async def edit_user_reset_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+    except ValueError:
+        days = 0
+    if days <= 0 or days > 3650:
+        await update.message.reply_text("❌ Enter a whole number from 1 to 3650:")
+        return EDIT_USER_RESET_DAYS
+    policy = context.user_data['edited_client_policy']
+    if policy == 'delayed_expiry':
+        context.user_data.update(edited_client_expiry=0, edited_client_delay_start=True,
+                                 edited_client_auto_reset=False, edited_client_reset_days=days,
+                                 edited_client_next_reset=0)
+    else:
+        starts_on_first_connection = policy == 'reset_first'
+        next_reset = 0 if starts_on_first_connection else int(
+            (datetime.now(timezone.utc) + timedelta(days=days)).timestamp()
+        )
+        context.user_data.update(edited_client_delay_start=starts_on_first_connection,
+                                 edited_client_auto_reset=True, edited_client_reset_days=days,
+                                 edited_client_next_reset=next_reset)
+    return await prompt_edit_enable(update.message, context)
 
 async def edit_user_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2719,11 +3152,17 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = context.user_data['edited_client_desc']
     group = context.user_data['edited_client_group']
     enable = context.user_data['edited_client_enable']
+    remark = context.user_data['edited_client_remark']
+    delay_start = context.user_data['edited_client_delay_start']
+    auto_reset = context.user_data['edited_client_auto_reset']
+    reset_days = context.user_data['edited_client_reset_days']
+    next_reset = context.user_data['edited_client_next_reset']
 
     volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
     expiry_str = "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
     selected_names = [get_inbound_display_name(i) for i in inbounds]
     enable_text = "✅ Enable" if enable else "❌ Disable"
+    policy_text = lifecycle_policy_text(delay_start, auto_reset, reset_days)
 
     await query.edit_message_text(
         "⏳ Implementing Changes...\n\n"
@@ -2734,6 +3173,8 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏰ Expiry: {expiry_str}\n"
         f"📝 Description: {desc}\n"
         f"👥 Group: {group}\n"
+        f"🗒️ Remark: {remark or 'None'}\n"
+        f"⚙️ Policy: {policy_text}\n"
         f"⚡ Status: {enable_text}\n"
         f"🔐 Secrets: {'Regenerated' if regenerate_secrets else 'Kept'}"
     )
@@ -2750,6 +3191,11 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         enable=enable,
         regenerate_secrets=regenerate_secrets,
         original_client=original_client,
+        remark=remark,
+        delay_start=delay_start,
+        auto_reset=auto_reset,
+        reset_days=reset_days,
+        next_reset=next_reset,
     )
 
     result = await create_or_edit_client("edit", edited_data_for_api)
@@ -2766,6 +3212,8 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏰ Expiry: {expiry_str}\n"
             f"📝 Description: {desc}\n"
             f"👥 Group: {group}\n"
+            f"🗒️ Remark: {remark or 'None'}\n"
+            f"⚙️ Policy: {policy_text}\n"
             f"⚡ status: {enable_text}\n"
             f"🔐 Secrets: {'Regenerated' if regenerate_secrets else 'Kept'}\n\n"
             "Main Menu: /start"
@@ -2883,7 +3331,7 @@ async def delete_user_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @rate_limited(admin_only=False)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED
+    global HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED, ADMIN_TIMEZONE, PAYMENT_CURRENCY
     query = update.callback_query
     await localized_query_answer(query)
     user_id = query.from_user.id
@@ -2928,6 +3376,56 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == 'settings_admin_tools':
             await query.edit_message_text(
                 build_admin_tools_settings_text(), reply_markup=build_admin_tools_settings_keyboard()
+            )
+        elif data == 'settings_timezone':
+            rows = [
+                [InlineKeyboardButton(
+                    f"{'✅ ' if key == ADMIN_TIMEZONE else ''}{label}",
+                    callback_data=f"settings_timezone_set_{key.lower()}",
+                )]
+                for key, (_, label) in ADMIN_TIMEZONES.items()
+            ]
+            rows.append([InlineKeyboardButton("🔙 Back", callback_data='settings_admin_tools')])
+            await query.edit_message_text(
+                "🕐 Administrative Timezone\n\nCreated and last-online timestamps will use this timezone.",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        elif data.startswith('settings_timezone_set_'):
+            selected = data.removeprefix('settings_timezone_set_').upper()
+            if selected not in ADMIN_TIMEZONES:
+                await localized_query_answer(query, "❌ Invalid timezone.", show_alert=True)
+                return
+            ADMIN_TIMEZONE = selected
+            save_runtime_setting("ADMIN_TIMEZONE", selected, RUNTIME_SETTINGS_FILE)
+            await query.edit_message_text(
+                build_admin_tools_settings_text(), reply_markup=build_admin_tools_settings_keyboard()
+            )
+            await localized_query_answer(query, "✅ Administrative timezone updated.", show_alert=True)
+        elif data == 'settings_currency':
+            rows = [
+                [InlineKeyboardButton(
+                    f"{'✅ ' if key == PAYMENT_CURRENCY else ''}{label}",
+                    callback_data=f"settings_currency_set_{key.lower()}",
+                )]
+                for key, label in PAYMENT_CURRENCIES.items()
+            ]
+            rows.append([InlineKeyboardButton("🔙 Back", callback_data='settings_payments')])
+            await query.edit_message_text(
+                "🌍 Payment Currency\n\nChanging currency changes the displayed unit only; review the monthly price afterwards.",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        elif data.startswith('settings_currency_set_'):
+            selected = data.removeprefix('settings_currency_set_').upper()
+            if selected not in PAYMENT_CURRENCIES:
+                await localized_query_answer(query, "❌ Invalid currency.", show_alert=True)
+                return
+            PAYMENT_CURRENCY = selected
+            save_runtime_setting("PAYMENT_CURRENCY", selected, RUNTIME_SETTINGS_FILE)
+            await query.edit_message_text(
+                build_payment_settings_text(), reply_markup=build_payment_settings_keyboard()
+            )
+            await localized_query_answer(
+                query, "✅ Currency updated. Confirm the monthly price.", show_alert=True
             )
         elif data == 'settings_connection_guides':
             await query.edit_message_text(
@@ -3211,7 +3709,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if op == 'plus':
                 new_price = RENEWAL_MONTHLY_PRICE + delta
             elif op == 'minus':
-                new_price = max(1000, RENEWAL_MONTHLY_PRICE - delta)
+                new_price = max(1, RENEWAL_MONTHLY_PRICE - delta)
             else:
                 await localized_query_answer(query, "❌ Invalid price action.", show_alert=True)
                 return
@@ -3221,7 +3719,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_payment_settings_text(),
                 reply_markup=build_payment_settings_keyboard()
             )
-            await localized_query_answer(query, f"✅ New monthly price: {RENEWAL_MONTHLY_PRICE:,}", show_alert=False)
+            await localized_query_answer(query, f"✅ New monthly price: {format_money(RENEWAL_MONTHLY_PRICE)}", show_alert=False)
         elif data == 'create_user_prompt':
             if user_id != ADMIN_TELEGRAM_ID:
                 await localized_query_answer(query, "❌ Only admin", show_alert=True)
@@ -3393,7 +3891,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for months in month_options:
                 amount = renewal_amount(months)
                 keyboard.append([InlineKeyboardButton(
-                    tr(user_id, "renew_plan_button", months=months, amount=amount),
+                    tr(user_id, "renew_plan_button", months=months, amount_text=format_money(amount)),
                     callback_data=f'renew_choose_{client_id}_{months}',
                 )])
             keyboard.append([InlineKeyboardButton(tr(user_id, "back"), callback_data=f'select_sub_{client_id}')])
@@ -3436,7 +3934,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"{tr(user_id, 'renew_payment')}\n\n"
                 f"{tr(user_id, 'duration_value', months=months)}\n"
-                f"{tr(user_id, 'amount_value', amount=amount)}\n"
+                f"{tr(user_id, 'amount_value', amount_text=format_money(amount))}\n"
                 f"{tr(user_id, 'card_number_value', card_number=card_number)}{holder_line}\n\n"
                 f"{tr(user_id, 'payment_instructions')}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -3495,12 +3993,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 req["target_expiry"] = new_expiry
 
             # Build edit payload from current server object and only change expiry.
-            edited_data_for_api = json.loads(json.dumps(client))
-            edited_data_for_api["id"] = client_id
-            edited_data_for_api["expiry"] = new_expiry
-            edited_data_for_api["enable"] = True
-            edited_data_for_api["up"] = 0
-            edited_data_for_api["down"] = 0
+            edited_data_for_api = build_client_renewal_data(client, client_id, new_expiry)
             result = await create_or_edit_client("edit", edited_data_for_api)
             if result and result.get("success"):
                 global clients_cache, clients_cache_time
@@ -3514,7 +4007,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"✅ Renewal approved by admin.\n\n"
                             f"📝 Subscription: {client_desc}\n"
                             f"📦 Duration Added: {months} Month(s)\n"
-                            f"💰 Amount: {amount:,} Tooman\n"
+                            f"💰 Amount: {format_money(amount)}\n"
                             f"🆔 Client ID: {client_id}\n"
                             f"⏰ New Expiry: {new_days}"
                         )
@@ -3530,7 +4023,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"User TG: {user_tg_id}\n"
                             f"Client ID: {client_id}\n"
                             f"Duration: {months} month(s)\n"
-                            f"Amount: {amount:,} Tooman\n"
+                            f"Amount: {format_money(amount)}\n"
                             f"New Expiry: {new_days}"
                         )
                     )
@@ -3541,7 +4034,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"User TG: {user_tg_id}\n"
                         f"Client ID: {client_id}\n"
                         f"Duration: {months} month(s)\n"
-                        f"Amount: {amount:,} Tooman\n"
+                        f"Amount: {format_money(amount)}\n"
                         f"New Expiry: {new_days}"
                     )
             else:
@@ -3865,6 +4358,80 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             page = int(data.split('_')[-1])
             await show_links_page(query, page=page)
+        elif data == 'assign_interactive':
+            context.user_data.pop('pending_interactive_assignment', None)
+            await show_interactive_assignment_clients(query, page=1)
+        elif data.startswith('assign_page_'):
+            await show_interactive_assignment_clients(query, page=int(data.rsplit('_', 1)[1]))
+        elif data.startswith('assign_pick_'):
+            client_id = int(data.rsplit('_', 1)[1])
+            clients = await get_all_clients_list()
+            client = find_client_by_id(clients, client_id)
+            if client is None:
+                await localized_query_answer(query, "❌ Client no longer exists.", show_alert=True)
+                return
+            request_id = secrets.randbelow(2_000_000_000) + 1
+            context.user_data['pending_interactive_assignment'] = {
+                'client_id': client_id,
+                'client_name': str(client.get('name') or 'Unknown'),
+                'request_id': request_id,
+            }
+            picker = ReplyKeyboardMarkup(
+                [[KeyboardButton(
+                    "👤 Choose Telegram Account",
+                    request_users=KeyboardButtonRequestUsers(
+                        request_id=request_id,
+                        user_is_bot=False,
+                        max_quantity=1,
+                        request_name=True,
+                        request_username=True,
+                    ),
+                )], [KeyboardButton("❌ Cancel Interactive Assignment")]],
+                resize_keyboard=True,
+                one_time_keyboard=True,
+            )
+            await query.edit_message_text(
+                f"✅ S-UI client selected: {preserve_dynamic_text(context.user_data['pending_interactive_assignment']['client_name'])} "
+                f"(ID: {client_id})\n\nUse the Telegram account picker sent below."
+            )
+            await query.message.reply_text(
+                "Choose one Telegram account. Telegram only shows accounts it allows you to share with this bot.",
+                reply_markup=picker,
+            )
+        elif data == 'assign_confirm':
+            pending = context.user_data.get('pending_interactive_assignment')
+            if not isinstance(pending, dict) or not pending.get('telegram_id'):
+                await localized_query_answer(query, "❌ Assignment expired. Start again.", show_alert=True)
+                return
+            client_id = int(pending['client_id'])
+            telegram_id = int(pending['telegram_id'])
+            clients = await get_all_clients_list()
+            if find_client_by_id(clients, client_id) is None:
+                context.user_data.pop('pending_interactive_assignment', None)
+                await query.edit_message_text("❌ The selected S-UI client no longer exists.")
+                return
+            added, count = add_client_assignment(telegram_id, client_id)
+            context.user_data.pop('pending_interactive_assignment', None)
+            if added:
+                result_text = (
+                    f"✅ Client ID {client_id} assigned to Telegram ID {telegram_id}.\n"
+                    f"That Telegram account now has {count} subscription(s)."
+                )
+            else:
+                result_text = f"⚠️ Client ID {client_id} is already assigned to Telegram ID {telegram_id}."
+            await query.edit_message_text(
+                result_text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Assign Another", callback_data='assign_interactive')],
+                    [InlineKeyboardButton("🔗 View Links", callback_data='manage_links')],
+                ]),
+            )
+        elif data == 'assign_abort':
+            context.user_data.pop('pending_interactive_assignment', None)
+            await query.edit_message_text(
+                "❌ Interactive assignment canceled.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='add_link_help')]]),
+            )
         elif data == 'add_link_help':
             if user_id != ADMIN_TELEGRAM_ID:
                 await localized_query_answer(query, "❌ Only admin", show_alert=True)
@@ -3905,6 +4472,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += "✅ All Users Are Linked."
 
             keyboard = [
+                [InlineKeyboardButton("👤 Interactive Assignment", callback_data='assign_interactive')],
                 [InlineKeyboardButton("🔙 Return To List", callback_data='manage_links')],
                 [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')]
             ]
@@ -4394,7 +4962,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         f"Name: {client_name}\n"
         f"Description: {client_desc}\n"
         f"Duration: {months} month(s)\n"
-        f"Amount: {amount:,} Tooman"
+        f"Amount: {format_money(amount)}"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Approve", callback_data=f"renew_appr_{request_id}")],
@@ -5374,7 +5942,10 @@ async def main():
             CREATE_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_volume), CallbackQueryHandler(create_user_volume)],
             CREATE_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_expiry), CallbackQueryHandler(create_user_expiry)],
             CREATE_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_desc)],
-            CREATE_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_group)]
+            CREATE_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_group)],
+            CREATE_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_remark)],
+            CREATE_USER_LIFECYCLE: [CallbackQueryHandler(create_user_lifecycle)],
+            CREATE_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_reset_days)],
         },
         fallbacks=[CommandHandler('cancel', create_user_cancel)],
         allow_reentry=True
@@ -5390,6 +5961,9 @@ async def main():
             EDIT_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_expiry), CallbackQueryHandler(edit_user_expiry)],
             EDIT_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_desc)],
             EDIT_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_group)],
+            EDIT_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_remark)],
+            EDIT_USER_LIFECYCLE: [CallbackQueryHandler(edit_user_lifecycle)],
+            EDIT_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_reset_days)],
             EDIT_USER_ENABLE: [CallbackQueryHandler(edit_user_enable)],
             EDIT_USER_REGEN: [CallbackQueryHandler(edit_user_regen)]
         },
@@ -5421,12 +5995,16 @@ async def main():
     settings_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(
             settings_card_start,
-            pattern='^settings_set_card_number$|^settings_set_card_holder$|^settings_set_display_name$',
+            pattern=(
+                '^settings_set_card_number$|^settings_set_card_holder$|'
+                '^settings_set_display_name$|^settings_set_monthly_price$'
+            ),
         )],
         states={
             SETTINGS_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_number_input)],
             SETTINGS_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_holder_input)],
             SETTINGS_DISPLAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_display_name_input)],
+            SETTINGS_MONTHLY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_monthly_price_input)],
         },
         fallbacks=[CommandHandler('cancel', settings_card_cancel)],
         allow_reentry=True
@@ -5480,6 +6058,10 @@ async def main():
     app.add_handler(CommandHandler("assign", assign))
     app.add_handler(CommandHandler("unlink", unlink_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
+    app.add_handler(MessageHandler(filters.StatusUpdate.USERS_SHARED, interactive_assign_user_shared))
+    app.add_handler(MessageHandler(
+        filters.Regex(r'^❌ Cancel Interactive Assignment$'), interactive_assign_cancel
+    ))
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, renew_receipt_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)

@@ -6,10 +6,13 @@ SUI Bot is a Telegram administration bot for an [S-UI](https://github.com/alirez
 
 ## Features
 
-- Create, edit, enable, disable, and delete S-UI clients.
+- Create and edit every current S-UI client lifecycle field, including group, description, administrator remark, regular expiry, delayed expiry from first connection, and periodic traffic reset.
+- Enable, disable, and delete S-UI clients. Creation timestamps and last-online timestamps remain panel-managed; ordinary edits preserve usage counters, while an approved renewal resets current and accumulated usage.
 - Assign one or more subscriptions to a Telegram account.
+- Keep the exact `/assign <TelegramID> <ClientID>` command, or use an admin-only interactive flow that lists unassigned S-UI clients and opens Telegram's native account picker before confirmation. Telegram does not permit bots to globally search usernames; the selected person must start the bot before receiving messages.
 - Display usage, expiry, status, subscription links, and web-panel links.
 - Handle renewal plans, payment receipts, approval, and rejection.
+- Let the administrator choose TOMAN, USD, CNY, or RUB for all displayed renewal prices.
 - Send broadcasts and expiry reminders.
 - Let administrators publish ordered, media-rich connection guides for Android, iOS, Windows, or custom platforms.
 - Create size-limited database backups and report server health.
@@ -79,6 +82,8 @@ Every account—including the administrator—is asked to select English, Persia
 The selected language applies to the complete Telegram interface: administrator menus and workflows, user subscription and renewal screens, inline buttons, validation/errors, scheduled reminders, reports, backup notifications, and captions. Server-provided names, descriptions, IDs, and commands remain unchanged. URLs also remain unchanged unless the administrator explicitly enables the subscription-port removal option described below.
 
 The administrator can change the owner-facing brand from **Settings → Set message display name**. This changes only the name written inside messages produced by the bot. It never changes the Telegram profile name or `@username`; those remain exactly as configured through BotFather. Linux service names and data paths also remain `sui-bot`.
+
+Under **Settings → Administration**, the administrator can choose UTC/Global, Iran, China, or Russia (Moscow) as the timezone used for panel timestamps such as client creation and last-online time. Under **Settings → Payments & Renewal**, the administrator can choose TOMAN, USD, CNY, or RUB. Changing currency changes the displayed unit rather than converting the numeric price, so review the monthly price immediately afterwards. Both choices are stored in bot state and included in bot backups.
 
 The admin-only **Remove port from subscription links** setting can produce clean user-facing URLs such as `https://example.com/path/user/` instead of `https://example.com:2096/path/user/`. Enabling it requires a separate confirmation after a warning. Configure nginx, another reverse proxy, or equivalent server routing first so portless requests reach the S-UI subscription endpoint; otherwise the rewritten links will fail. The bot does not modify nginx or the S-UI server.
 
@@ -205,7 +210,7 @@ Updates replace the application and virtual environment but preserve:
 | `/var/lib/sui-bot/assignments.json` | Telegram-to-S-UI client assignments |
 | `/var/lib/sui-bot/backups` | Downloaded database backups |
 | `/var/lib/sui-bot/user_languages.json` | Per-user language preferences |
-| `/var/lib/sui-bot/runtime_settings.json` | Renewal and payment display settings |
+| `/var/lib/sui-bot/runtime_settings.json` | Display name, renewal, currency, timezone, and other non-secret runtime settings |
 | `/var/lib/sui-bot/connection_guides.json` | Enabled state and administrator-authored connection guides |
 | `/var/www/sui-bot/index.html` | Generated optional web-panel page |
 | `/etc/nginx/conf.d/sui-bot-web-panel.conf` | Optional nginx site managed by `sui-bot web-panel` |

@@ -69,6 +69,20 @@ def test_invalid_web_panel_setting_in_backup_is_rejected(tmp_path):
         build_bundle({"runtime_settings": source}, {})
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ('{"ADMIN_TIMEZONE": "MARS"}', "timezone"),
+        ('{"PAYMENT_CURRENCY": "BTC"}', "currency"),
+    ],
+)
+def test_invalid_regional_runtime_settings_are_rejected(tmp_path, payload, message):
+    source = tmp_path / "runtime_settings.json"
+    source.write_text(payload, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        build_bundle({"runtime_settings": source}, {})
+
+
 def test_connection_guides_are_validated_in_backup(tmp_path):
     source = tmp_path / "connection_guides.json"
     source.write_text(

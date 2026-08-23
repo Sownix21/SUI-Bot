@@ -159,7 +159,9 @@ def test_client_payloads_match_current_sui_defaults_and_random_util(tmp_path) ->
     })
     script = """
 import base64
-from sui_bot.bot import build_client_data_edit, build_client_data_new
+from unittest.mock import patch
+import sui_bot.bot as bot
+from sui_bot.bot import build_client_data_edit, build_client_data_new, build_client_renewal_data
 
 created = build_client_data_new("alice", 0, 0, "Test", "Family", [9, 10])
 assert created["remark"] == ""
@@ -173,6 +175,14 @@ assert len(base64.b64decode(created["config"]["shadowsocks16"]["password"], vali
 assert created["config"]["shadowtls"]["password"] == created["config"]["shadowsocks"]["password"]
 assert created["config"]["vmess"]["uuid"] == created["config"]["vless"]["uuid"]
 assert created["config"]["tuic"]["uuid"] == created["config"]["vmess"]["uuid"]
+
+scheduled = build_client_data_new(
+    "scheduled", 0, 0, "Test", "Family", [9], remark="priority",
+    delay_start=True, auto_reset=True, reset_days=15, next_reset=0,
+)
+assert scheduled["remark"] == "priority"
+assert scheduled["delayStart"] is True and scheduled["autoReset"] is True
+assert scheduled["resetDays"] == 15 and scheduled["nextReset"] == 0
 
 original = {
     **created,
@@ -191,6 +201,31 @@ for field in ("remark", "delayStart", "autoReset", "resetDays", "nextReset", "to
     assert edited[field] == original[field]
 assert edited["config"]["mixed"]["username"] == "bob"
 assert edited["config"]["mixed"]["password"] == original["config"]["mixed"]["password"]
+
+changed_policy = build_client_data_edit(
+    95, "bob", 0, 0, "Edited", "Work", [9], original_client=original,
+    remark="new note", delay_start=False, auto_reset=True, reset_days=30, next_reset=999,
+)
+assert changed_policy["remark"] == "new note"
+assert changed_policy["autoReset"] is True and changed_policy["delayStart"] is False
+assert changed_policy["resetDays"] == 30 and changed_policy["nextReset"] == 999
+assert changed_policy["totalUp"] == 456 and changed_policy["totalDown"] == 789
+assert changed_policy["createdAt"] == 1000 and changed_policy["onlineAt"] == 2000
+
+renewed = build_client_renewal_data(original, 95, 5000)
+assert renewed["expiry"] == 5000 and renewed["enable"] is True
+assert renewed["up"] == renewed["down"] == 0
+assert renewed["totalUp"] == renewed["totalDown"] == 0
+assert renewed["createdAt"] == 1000 and renewed["onlineAt"] == 2000
+assert original["totalUp"] == 456 and original["totalDown"] == 789
+
+bot.telegram_clients.clear()
+with patch.object(bot, "save_assignments") as saver:
+    assert bot.add_client_assignment(123, 95) == (True, 1)
+    assert bot.add_client_assignment(123, 96) == (True, 2)
+    assert bot.add_client_assignment(123, 95) == (False, 2)
+    assert bot.telegram_clients == {123: [95, 96]}
+    assert saver.call_count == 2
 """
     result = subprocess.run(  # noqa: S603 - current test interpreter and fixed test program
         [sys.executable, "-c", script],
@@ -276,8 +311,8 @@ async def check_api_failures_and_request_count():
         assert record["name"] == "alice"
         rendered = localize_outgoing_text("en", message)
         assert "Remark: priority client" in rendered
-        assert "Created: 2024-01-01 00:00:00 UTC" in rendered
-        assert "Last Online: 2024-01-02 00:00:00 UTC" in rendered
+        assert "Created: 2024-01-01 00:00:00 UTC+00:00" in rendered
+        assert "Last Online: 2024-01-02 00:00:00 UTC+00:00" in rendered
         regular_user = localize_outgoing_text("en", format_client(record, is_admin=False, user_id=10))
         assert "Remark:" not in regular_user and "Last Online:" not in regular_user
         assert format_client_timestamp(0) is None

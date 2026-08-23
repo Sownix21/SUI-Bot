@@ -28,10 +28,10 @@ def test_translation_falls_back_to_english():
 
 
 def test_renewal_templates_are_native_to_each_selected_language():
-    english = translate("en", "renew_plan_button", months=3, amount=100000)
-    persian = translate("fa", "renew_plan_button", months=3, amount=100000)
-    russian = translate("ru", "renew_plan_button", months=3, amount=100000)
-    chinese = translate("zh", "renew_plan_button", months=3, amount=100000)
+    english = translate("en", "renew_plan_button", months=3, amount_text="100,000 USD")
+    persian = translate("fa", "renew_plan_button", months=3, amount_text="100,000 USD")
+    russian = translate("ru", "renew_plan_button", months=3, amount_text="100,000 USD")
+    chinese = translate("zh", "renew_plan_button", months=3, amount_text="100,000 USD")
 
     assert "ماه" not in english
     assert "Month" not in persian and "ماه" in persian

@@ -34,6 +34,8 @@ RUNTIME_SETTING_KEYS = frozenset({
     "BOT_DISPLAY_NAME",
     "HIDE_SUBSCRIPTION_PORT",
     "WEB_PANEL_ENABLED",
+    "ADMIN_TIMEZONE",
+    "PAYMENT_CURRENCY",
 })
 LANGUAGE_CODES = frozenset({"en", "fa", "ru", "zh"})
 
@@ -85,6 +87,12 @@ def _validate_state_entry(key: str, value: Any) -> None:
         web_panel_enabled = value.get("WEB_PANEL_ENABLED")
         if web_panel_enabled is not None and str(web_panel_enabled).strip().lower() not in {"true", "false"}:
             raise ValueError("runtime settings contain an invalid web-panel setting")
+        admin_timezone = value.get("ADMIN_TIMEZONE")
+        if admin_timezone is not None and str(admin_timezone).upper() not in {"UTC", "IRAN", "CHINA", "RUSSIA"}:
+            raise ValueError("runtime settings contain an invalid administrative timezone")
+        payment_currency = value.get("PAYMENT_CURRENCY")
+        if payment_currency is not None and str(payment_currency).upper() not in {"TOMAN", "USD", "CNY", "RUB"}:
+            raise ValueError("runtime settings contain an invalid payment currency")
     elif key == "connection_guides":
         validate_guide_data(value)
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):

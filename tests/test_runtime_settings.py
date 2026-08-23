@@ -30,3 +30,11 @@ def test_web_panel_preference_is_an_allowed_runtime_setting(tmp_path) -> None:
     target = tmp_path / "settings.json"
     save_runtime_setting("WEB_PANEL_ENABLED", "true", str(target))
     assert load_runtime_settings(str(target))["WEB_PANEL_ENABLED"] == "true"
+
+
+def test_timezone_and_currency_are_allowed_runtime_settings(tmp_path) -> None:
+    target = tmp_path / "settings.json"
+    save_runtime_setting("ADMIN_TIMEZONE", "IRAN", str(target))
+    save_runtime_setting("PAYMENT_CURRENCY", "USD", str(target))
+    assert load_runtime_settings(str(target))["ADMIN_TIMEZONE"] == "IRAN"
+    assert load_runtime_settings(str(target))["PAYMENT_CURRENCY"] == "USD"

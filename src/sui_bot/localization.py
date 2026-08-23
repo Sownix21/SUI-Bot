@@ -215,10 +215,10 @@ for _language, _messages in REMINDER_TRANSLATIONS.items():
 
 RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
-        "renew_plan_button": "{months} month(s) — {amount:,} toman",
+        "renew_plan_button": "{months} month(s) — {amount_text}",
         "renew_title": "💳 Renewal Request", "renew_choose_duration": "Choose a renewal duration:",
         "renew_payment": "💳 Renewal Payment", "duration_value": "📦 Duration: {months} month(s)",
-        "amount_value": "💰 Amount: {amount:,} toman", "card_number_value": "🏦 Card number: {card_number}",
+        "amount_value": "💰 Amount: {amount_text}", "card_number_value": "🏦 Card number: {card_number}",
         "card_holder_value": "👤 Card holder: {holder}",
         "payment_instructions": "Pay the displayed amount to the card above, then send the receipt image here. After sending it, wait for administrator approval.",
         "renew_cancelled": "❌ Renewal request cancelled.", "receipt_sent": "✅ Your receipt was sent to the administrator. Please wait for approval.",
@@ -246,9 +246,9 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "broadcast_delivery": "📢 Message from administrator\n\n{message}\n\nThis message was sent automatically.",
     },
     "fa": {
-        "renew_plan_button": "{months} ماه — {amount:,} تومان", "renew_title": "💳 درخواست تمدید",
+        "renew_plan_button": "{months} ماه — {amount_text}", "renew_title": "💳 درخواست تمدید",
         "renew_choose_duration": "مدت تمدید را انتخاب کنید:", "renew_payment": "💳 پرداخت تمدید",
-        "duration_value": "📦 مدت: {months} ماه", "amount_value": "💰 مبلغ: {amount:,} تومان",
+        "duration_value": "📦 مدت: {months} ماه", "amount_value": "💰 مبلغ: {amount_text}",
         "card_number_value": "🏦 شماره کارت: {card_number}", "card_holder_value": "👤 صاحب کارت: {holder}",
         "payment_instructions": "مبلغ نمایش‌داده‌شده را به کارت بالا واریز کنید و تصویر رسید را همین‌جا بفرستید. سپس منتظر تأیید مدیر بمانید.",
         "renew_cancelled": "❌ درخواست تمدید لغو شد.", "receipt_sent": "✅ رسید شما برای مدیر ارسال شد. لطفاً منتظر تأیید بمانید.",
@@ -276,9 +276,9 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "broadcast_delivery": "📢 اطلاعیه مدیر\n\n{message}\n\nاین پیام به‌صورت خودکار ارسال شده است.",
     },
     "ru": {
-        "renew_plan_button": "{months} мес. — {amount:,} томан", "renew_title": "💳 Запрос продления",
+        "renew_plan_button": "{months} мес. — {amount_text}", "renew_title": "💳 Запрос продления",
         "renew_choose_duration": "Выберите срок продления:", "renew_payment": "💳 Оплата продления",
-        "duration_value": "📦 Срок: {months} мес.", "amount_value": "💰 Сумма: {amount:,} томан",
+        "duration_value": "📦 Срок: {months} мес.", "amount_value": "💰 Сумма: {amount_text}",
         "card_number_value": "🏦 Номер карты: {card_number}", "card_holder_value": "👤 Владелец карты: {holder}",
         "payment_instructions": "Переведите указанную сумму на карту выше и отправьте сюда изображение чека. Затем дождитесь подтверждения администратора.",
         "renew_cancelled": "❌ Запрос продления отменён.", "receipt_sent": "✅ Ваш чек отправлен администратору. Дождитесь подтверждения.",
@@ -306,9 +306,9 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "broadcast_delivery": "📢 Сообщение администратора\n\n{message}\n\nЭто сообщение отправлено автоматически.",
     },
     "zh": {
-        "renew_plan_button": "{months} 个月 — {amount:,} 托曼", "renew_title": "💳 续订请求",
+        "renew_plan_button": "{months} 个月 — {amount_text}", "renew_title": "💳 续订请求",
         "renew_choose_duration": "请选择续订时长：", "renew_payment": "💳 续订付款",
-        "duration_value": "📦 时长：{months} 个月", "amount_value": "💰 金额：{amount:,} 托曼",
+        "duration_value": "📦 时长：{months} 个月", "amount_value": "💰 金额：{amount_text}",
         "card_number_value": "🏦 卡号：{card_number}", "card_holder_value": "👤 持卡人：{holder}",
         "payment_instructions": "请将显示的金额转入上方银行卡，然后在此发送收据图片并等待管理员审核。",
         "renew_cancelled": "❌ 续订请求已取消。", "receipt_sent": "✅ 您的收据已发送给管理员，请等待审核。",
