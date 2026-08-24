@@ -73,6 +73,44 @@ assert bot.web_panel_url_for("alice").startswith("https://panel.example.com:2083
     assert result.returncode == 0, result.stderr
 
 
+def test_callback_acknowledgement_timeout_does_not_abort_button_processing(tmp_path) -> None:
+    environment = os.environ.copy()
+    environment.update({
+        "SUI_HOST": "https://panel.example.com",
+        "SUI_TOKEN": "secret",
+        "BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz_ABCD",
+        "ADMIN_TELEGRAM_ID": "123456",
+        "DATA_DIR": str(tmp_path),
+        "BOT_LOG_FILE": "",
+    })
+    script = """
+import asyncio
+from unittest.mock import AsyncMock, patch
+from telegram.error import TimedOut
+from sui_bot.bot import localized_query_answer
+
+query = type("Query", (), {})()
+query.from_user = type("User", (), {"id": 123456})()
+query.answer = AsyncMock(side_effect=TimedOut("temporary timeout"))
+
+with patch("sui_bot.bot.logger.warning") as warning:
+    result = asyncio.run(localized_query_answer(query))
+
+assert result is None
+query.answer.assert_awaited_once_with(None)
+warning.assert_called_once()
+assert "continuing button action" in warning.call_args.args[0]
+"""
+    result = subprocess.run(  # noqa: S603 - current test interpreter and fixed test program
+        [sys.executable, "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_expired_user_receives_localized_message_and_renew_action(tmp_path) -> None:
     environment = os.environ.copy()
     environment.update({

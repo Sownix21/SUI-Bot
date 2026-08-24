@@ -482,7 +482,17 @@ async def localized_query_answer(query, text=None, *args, **kwargs):
     localized = localize_outgoing_text(
         user_language(query.from_user.id), text, display_name=BOT_DISPLAY_NAME
     )
-    return await query.answer(localized, *args, **kwargs)
+    try:
+        return await query.answer(localized, *args, **kwargs)
+    except NetworkError as exc:
+        # Answering a callback only dismisses Telegram's loading indicator. A
+        # temporary Telegram/API timeout must not cancel the actual button
+        # operation that follows.
+        logger.warning(
+            "Telegram callback acknowledgement was interrupted (%s); continuing button action",
+            exc,
+        )
+        return None
 
 def localized_remaining_time(expiry_timestamp: int, user_id: int) -> str:
     if expiry_timestamp == 0:
