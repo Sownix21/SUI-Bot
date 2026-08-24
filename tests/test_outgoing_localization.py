@@ -52,6 +52,34 @@ def test_bot_commands_are_never_translated_but_surrounding_guidance_is():
         assert "/لغو" not in localized
 
 
+def test_optional_remark_guidance_is_never_mixed_language():
+    source = "This is optional and separate from the user description."
+    expected = {
+        "fa": "این بخش اختیاری و جدا از توضیحات کاربر است.",
+        "ru": "Это необязательное поле, отдельное от описания пользователя.",
+        "zh": "此项为可选内容，与用户描述相互独立。",
+    }
+    for language, translation in expected.items():
+        assert localize_outgoing_text(language, source) == translation
+
+
+def test_inactive_user_reports_use_complete_localized_phrases():
+    source = (
+        "With Telegram Links: 37\n"
+        "Without Telegram Links: 5\n"
+        "Active Users: 37\n"
+        "All Linked Users Started The Bot.\n"
+        "Users Without Link:\n"
+        "1. Test (ID: 77) - 2 Days Left"
+    )
+    persian = localize_outgoing_text("fa", source)
+    for english_fragment in ("Stats", "With", "Without", "Active", "All Linked", "Without Link", "Left"):
+        assert english_fragment not in persian
+    assert "دارای اتصال تلگرام" in persian
+    assert "بدون اتصال" in persian
+    assert "روز باقی مانده" in persian
+
+
 def test_owner_brand_replaces_fixed_brand_but_not_server_values():
     source = f"Welcome to SUI Bot\nServer: {preserve_dynamic_text('SUI Bot')}"
     assert localize_outgoing_text("en", source, display_name="Owner VPN") == (

@@ -4949,17 +4949,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         inactive_users.append(user)
                     else:
                         logger.warning(f"Error checking user {user['tg_id']}: {e}")
-            report_message = "👥 **Check Inactive Users**\n\n"
-
-            report_message += "📊 **Stats:**\n"
-            report_message += f"• 📋 Total Users: {len(clients)}\n"
-            report_message += f"• 🔗 With Telegram Links: {len(users_with_expiry)}\n"
-            report_message += f"• 🔌 Without Telegram Links: {len(users_without_link)}\n"
-            report_message += f"• ✅ Active Users: {len(active_users)}\n"
-            report_message += f"• 🚫 Inactive Users: {len(inactive_users)}\n\n"
+            report_message = f"{tr(user_id, 'inactive_check_title')}\n\n"
+            report_message += f"{tr(user_id, 'report_stats')}\n"
+            report_message += f"• {tr(user_id, 'total_users')}: {len(clients)}\n"
+            report_message += f"• {tr(user_id, 'with_telegram_links', count=len(users_with_expiry))}\n"
+            report_message += f"• {tr(user_id, 'without_telegram_links', count=len(users_without_link))}\n"
+            report_message += f"• {tr(user_id, 'active_users_count', count=len(active_users))}\n"
+            report_message += f"• {tr(user_id, 'inactive_users_count', count=len(inactive_users))}\n\n"
 
             if inactive_users:
-                report_message += "🚫 **Inactive Users (Haven't Started The Bot)**\n"
+                report_message += f"{tr(user_id, 'inactive_not_started_title')}\n"
                 for i, user in enumerate(inactive_users[:15], 1):
                     expiry_date = datetime.fromtimestamp(user["expiry"], timezone.utc)
                     now = datetime.now(timezone.utc)
@@ -4968,16 +4967,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if remaining_seconds % 86400 > 0:
                         remaining_days += 1
 
-                    report_message += f"{i}. {user['desc']}\n"
-                    report_message += f"   👤 Username: {user['name']}\n"
-                    report_message += f"   🆔 Client ID: {user['client_id']}\n"
-                    report_message += f"   📱 Telegram ID: {user['tg_id']}\n"
-                    report_message += f"   📅 Expiry: {remaining_days} Days\n\n"
+                    report_message += tr(
+                        user_id,
+                        "inactive_check_item",
+                        index=i,
+                        description=preserve_dynamic_text(user["desc"]),
+                        name=preserve_dynamic_text(user["name"]),
+                        client_id=user["client_id"],
+                        telegram_id=user["tg_id"],
+                        days=remaining_days,
+                    ) + "\n"
             else:
-                report_message += "✅ All Linked Users Started The Bot.\n\n"
+                report_message += f"{tr(user_id, 'all_linked_started')}\n\n"
 
             if users_without_link:
-                report_message += "🔌 **Users Without Telegram Links:**\n"
+                report_message += f"{tr(user_id, 'without_telegram_title')}\n"
                 for i, user in enumerate(users_without_link[:10], 1):
                     expiry_date = datetime.fromtimestamp(user["expiry"], timezone.utc)
                     now = datetime.now(timezone.utc)
@@ -4986,7 +4990,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if remaining_seconds % 86400 > 0:
                         remaining_days += 1
 
-                    report_message += f"{i}. {user['desc']} (ID: {user['client_id']}) - {remaining_days} Days Left\n"
+                    report_message += tr(
+                        user_id,
+                        "without_telegram_item",
+                        index=i,
+                        description=preserve_dynamic_text(user["desc"]),
+                        client_id=user["client_id"],
+                        days=remaining_days,
+                    ) + "\n"
 
             keyboard = [
                 [InlineKeyboardButton("🔄 Update", callback_data='check_inactive_users')],

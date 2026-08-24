@@ -269,6 +269,57 @@ for _language, _messages in REMINDER_TRANSLATIONS.items():
     TRANSLATIONS[_language].update(_messages)
 
 
+INACTIVE_CHECK_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        "inactive_check_title": "👥 Check Inactive Users", "report_stats": "📊 Stats:",
+        "with_telegram_links": "🔗 With Telegram links: {count}",
+        "without_telegram_links": "🔌 Without Telegram links: {count}",
+        "active_users_count": "✅ Active users: {count}", "inactive_users_count": "🚫 Inactive users: {count}",
+        "inactive_not_started_title": "🚫 Inactive users (haven't started the bot)",
+        "inactive_check_item": "{index}. {description}\n   👤 Username: {name}\n   🆔 Client ID: {client_id}\n   📱 Telegram ID: {telegram_id}\n   📅 Expiry: {days} day(s)\n",
+        "all_linked_started": "✅ All linked users started the bot.",
+        "without_telegram_title": "🔌 Users without Telegram links:",
+        "without_telegram_item": "{index}. {description} (ID: {client_id}) — {days} day(s) remaining",
+    },
+    "fa": {
+        "inactive_check_title": "👥 بررسی کاربران غیرفعال", "report_stats": "📊 آمار:",
+        "with_telegram_links": "🔗 دارای اتصال تلگرام: {count}",
+        "without_telegram_links": "🔌 بدون اتصال تلگرام: {count}",
+        "active_users_count": "✅ کاربران فعال: {count}", "inactive_users_count": "🚫 کاربران غیرفعال: {count}",
+        "inactive_not_started_title": "🚫 کاربران غیرفعال (ربات را شروع نکرده‌اند)",
+        "inactive_check_item": "{index}. {description}\n   👤 نام کاربری: {name}\n   🆔 شناسه کاربر: {client_id}\n   📱 شناسه تلگرام: {telegram_id}\n   📅 انقضا: {days} روز\n",
+        "all_linked_started": "✅ همه کاربران متصل، ربات را شروع کرده‌اند.",
+        "without_telegram_title": "🔌 کاربران بدون اتصال تلگرام:",
+        "without_telegram_item": "{index}. {description} (ID: {client_id}) — {days} روز باقی مانده",
+    },
+    "ru": {
+        "inactive_check_title": "👥 Проверка неактивных пользователей", "report_stats": "📊 Статистика:",
+        "with_telegram_links": "🔗 С привязкой Telegram: {count}",
+        "without_telegram_links": "🔌 Без привязки Telegram: {count}",
+        "active_users_count": "✅ Активные пользователи: {count}", "inactive_users_count": "🚫 Неактивные пользователи: {count}",
+        "inactive_not_started_title": "🚫 Неактивные пользователи (не запустили бота)",
+        "inactive_check_item": "{index}. {description}\n   👤 Имя пользователя: {name}\n   🆔 ID клиента: {client_id}\n   📱 ID Telegram: {telegram_id}\n   📅 Срок: {days} дн.\n",
+        "all_linked_started": "✅ Все привязанные пользователи запустили бота.",
+        "without_telegram_title": "🔌 Пользователи без привязки Telegram:",
+        "without_telegram_item": "{index}. {description} (ID: {client_id}) — осталось {days} дн.",
+    },
+    "zh": {
+        "inactive_check_title": "👥 检查非活跃用户", "report_stats": "📊 统计：",
+        "with_telegram_links": "🔗 已绑定 Telegram：{count}",
+        "without_telegram_links": "🔌 未绑定 Telegram：{count}",
+        "active_users_count": "✅ 活跃用户：{count}", "inactive_users_count": "🚫 非活跃用户：{count}",
+        "inactive_not_started_title": "🚫 非活跃用户（尚未启动机器人）",
+        "inactive_check_item": "{index}. {description}\n   👤 用户名：{name}\n   🆔 客户端 ID：{client_id}\n   📱 Telegram ID：{telegram_id}\n   📅 到期：{days} 天\n",
+        "all_linked_started": "✅ 所有已绑定用户都已启动机器人。",
+        "without_telegram_title": "🔌 未绑定 Telegram 的用户：",
+        "without_telegram_item": "{index}. {description}（ID：{client_id}）— 剩余 {days} 天",
+    },
+}
+
+for _language, _messages in INACTIVE_CHECK_TRANSLATIONS.items():
+    TRANSLATIONS[_language].update(_messages)
+
+
 RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "renew_plan_button": "{months} month(s) — {amount_text}",

@@ -72,6 +72,20 @@ def test_lifecycle_controls_are_translated_in_every_supported_language():
         assert catalog["lifecycle_edit_help"] != TRANSLATIONS["en"]["lifecycle_edit_help"]
 
 
+def test_inactive_user_report_templates_are_complete_in_every_language():
+    for language in ("fa", "ru", "zh"):
+        rendered = "\n".join((
+            translate(language, "report_stats"),
+            translate(language, "with_telegram_links", count=37),
+            translate(language, "without_telegram_links", count=5),
+            translate(language, "active_users_count", count=37),
+            translate(language, "all_linked_started"),
+            translate(language, "without_telegram_item", index=1, description="Test", client_id=77, days=2),
+        ))
+        assert rendered != translate("en", "report_stats")
+        assert not any(fragment in rendered for fragment in ("Stats", "With Telegram", "Without Telegram", "Active users", "Days Left"))
+
+
 def test_payment_admin_and_renewal_request_templates_are_native_and_keep_commands():
     english_prompt = translate("en", "monthly_price_prompt", currency="USD")
     for language in ("fa", "ru", "zh"):
