@@ -1,6 +1,13 @@
 import pytest
 
-from sui_bot.sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata, replace_url_origin
+from sui_bot.sui_metadata import (
+    build_subscription_base_from_settings,
+    build_subscription_urls,
+    build_web_panel_url,
+    extract_load_metadata,
+    extract_partial_metadata,
+    replace_url_origin,
+)
 
 
 def test_load_metadata_preserves_subscription_port_and_path():
@@ -30,6 +37,32 @@ def test_subscription_port_can_be_removed_without_changing_path_or_token():
     assert main == "https://subscription.example.com/token-part/nested/test%20user/"
     assert json_url == f"{main}?format=json"
     assert clash_url == f"{main}?format=clash"
+
+
+def test_partial_metadata_fallback_reconstructs_panel_subscription_uri():
+    settings = {
+        "success": True,
+        "obj": {
+            "subURI": "", "subDomain": "subscriptions.example.com", "subPort": "2096",
+            "subPath": "/private/sub/", "subCertFile": "/cert.pem", "subKeyFile": "/key.pem",
+        },
+    }
+    inbounds = {"success": True, "obj": {"inbounds": [{"id": 9, "tag": "vless"}, {"tag": "bad"}]}}
+
+    assert extract_partial_metadata(settings, inbounds, "https://panel.example.com/private") == (
+        "https://subscriptions.example.com:2096/private/sub",
+        [{"id": 9, "tag": "vless"}],
+    )
+
+
+def test_partial_metadata_prefers_explicit_sub_uri_and_validates_port():
+    assert build_subscription_base_from_settings(
+        {"subURI": "https://sub.example.com:2096/custom/path/"}, "https://panel.example.com"
+    ) == "https://sub.example.com:2096/custom/path"
+    with pytest.raises(ValueError, match="port"):
+        build_subscription_base_from_settings(
+            {"subURI": "", "subPort": "70000", "subPath": "/sub"}, "https://panel.example.com"
+        )
 
 
 def test_subscription_port_removal_preserves_ipv6_host_syntax():

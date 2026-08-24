@@ -290,6 +290,110 @@ COMMON_UI_PHRASES = {
 for _language, _phrases in COMMON_UI_PHRASES.items():
     PHRASES[_language].update(_phrases)
 
+# Complete phrases that must not fall back to word-by-word replacement. Keeping
+# these as full units prevents mixed-language sentences in stateful admin guides.
+STRICT_UI_PHRASES = {
+    "fa": {
+        "Send the `.sui-backup.json` file now.": "اکنون فایل `.sui-backup.json` را بفرستید.",
+        "Use `-` to clear holder name.": "برای پاک‌کردن نام صاحب کارت، `-` بفرستید.",
+        "Enter 12-19 digits.": "۱۲ تا ۱۹ رقم وارد کنید.", "max 80 chars": "حداکثر ۸۰ نویسه",
+        "Usage": "روش استفاده", "Select exactly one Telegram account": "دقیقاً یک حساب تلگرام انتخاب کنید",
+        "Telegram account selected": "حساب تلگرام انتخاب شد", "Confirm": "تأیید",
+        "This user selection is no longer active": "این انتخاب کاربر دیگر فعال نیست",
+        "The person must start the bot before it can send them messages": "این شخص باید ابتدا ربات را شروع کند تا ربات بتواند برای او پیام بفرستد",
+        "Interactive assignment canceled": "اتصال تعاملی لغو شد", "Unblocked": "رفع مسدودی شد",
+        "Enter a whole number from 1 to 3650": "یک عدد صحیح از ۱ تا ۳۶۵۰ وارد کنید",
+        "Operation canceled": "عملیات لغو شد", "Creating SUI Bot backup": "در حال ساخت پشتیبان ربات SUI",
+        "Invalid response from server": "پاسخ سرور نامعتبر است", "S-UI client selected": "کاربر S-UI انتخاب شد",
+        "Use the Telegram account picker sent below": "از انتخاب‌گر حساب تلگرام که در ادامه ارسال شده استفاده کنید",
+        "Choose one Telegram account. Telegram only shows accounts it allows you to share with this bot.": "یک حساب تلگرام انتخاب کنید. تلگرام فقط حساب‌هایی را نمایش می‌دهد که اجازه اشتراک‌گذاری آن‌ها با این ربات را دارید.",
+        "The selected S-UI client no longer exists": "کاربر انتخاب‌شده S-UI دیگر وجود ندارد",
+        "Created and last-online timestamps will use this timezone": "زمان ایجاد و آخرین اتصال با این منطقه زمانی نمایش داده می‌شود",
+        "This field is optional. Type a value or use a button below.": "این بخش اختیاری است. یک مقدار وارد کنید یا از دکمه‌های زیر استفاده کنید.",
+        "To Create a New User Follow The Procedure": "برای ساخت کاربر جدید مراحل زیر را دنبال کنید",
+        "To Edit an Existing User Follow The Procedure": "برای ویرایش کاربر موجود مراحل زیر را دنبال کنید",
+        "To Delete an Existing User Follow The Procedure": "برای حذف کاربر موجود مراحل زیر را دنبال کنید",
+        "This Command Guides You Through The Process": "این فرمان شما را مرحله‌به‌مرحله راهنمایی می‌کند",
+        "You Can Use Markdown": "می‌توانید از Markdown استفاده کنید", "Yes, Delete It": "بله، حذف شود",
+        "Client ID": "شناسه کاربر", "Inbounds": "ورودی‌ها", "Secrets": "اطلاعات محرمانه",
+        "Error Editing User": "خطا در ویرایش کاربر", "Links": "لینک‌ها", "Add User": "افزودن کاربر",
+        "Enabled months are shown with": "ماه‌های فعال با این علامت نمایش داده می‌شوند:",
+        "Optional": "اختیاری", "Dad": "پدر", "Uncle": "عمو", "Friend": "دوست",
+        "Max": "حداکثر", "Type a value or use a button below": "یک مقدار وارد کنید یا از دکمه زیر استفاده کنید",
+        "Card holder updated": "نام صاحب کارت بروزرسانی شد", "S-UI client": "کاربر S-UI",
+        "Registered": "ثبت شد", "Selected": "انتخاب‌شده", "Delete It": "حذف شود", "Edit": "ویرایش",
+        "User(s)": "کاربر", "Restore a SUI Bot Backup": "بازیابی پشتیبان ربات SUI",
+        "Create one validated file containing assignments, user language choices, metrics, runtime settings, and cached bot data.": "یک فایل معتبر شامل اتصال‌ها، زبان انتخابی کاربران، آمار، تنظیمات اجرایی و داده‌های ذخیره‌شده ربات ایجاد کنید.",
+        "Send the `.sui-backup.json` document": "فایل `.sui-backup.json` را بفرستید",
+        "The bot validates its format, checksum, size, and allowed data sections before restoring it.": "ربات پیش از بازیابی، قالب، checksum، اندازه و بخش‌های مجاز داده را اعتبارسنجی می‌کند.",
+    },
+    "ru": {
+        "Send the `.sui-backup.json` file now.": "Отправьте файл `.sui-backup.json`.",
+        "Use `-` to clear holder name.": "Отправьте `-`, чтобы очистить имя владельца.",
+        "Enter 12-19 digits.": "Введите от 12 до 19 цифр.", "max 80 chars": "не более 80 символов",
+        "Usage": "Использование", "Select exactly one Telegram account": "Выберите ровно один аккаунт Telegram",
+        "Telegram account selected": "Аккаунт Telegram выбран", "Confirm": "Подтвердить",
+        "This user selection is no longer active": "Этот выбор пользователя больше не активен",
+        "The person must start the bot before it can send them messages": "Пользователь должен сначала запустить бота, чтобы бот мог отправлять ему сообщения",
+        "Interactive assignment canceled": "Интерактивная привязка отменена", "Unblocked": "Разблокирован",
+        "Enter a whole number from 1 to 3650": "Введите целое число от 1 до 3650",
+        "Operation canceled": "Операция отменена", "Creating SUI Bot backup": "Создание резервной копии SUI Bot",
+        "Invalid response from server": "Недопустимый ответ сервера", "S-UI client selected": "Клиент S-UI выбран",
+        "Use the Telegram account picker sent below": "Используйте отправленный ниже выбор аккаунта Telegram",
+        "Choose one Telegram account. Telegram only shows accounts it allows you to share with this bot.": "Выберите один аккаунт Telegram. Telegram покажет только аккаунты, которыми разрешено поделиться с ботом.",
+        "The selected S-UI client no longer exists": "Выбранный клиент S-UI больше не существует",
+        "Created and last-online timestamps will use this timezone": "Время создания и последнего подключения будет показано в этом часовом поясе",
+        "This field is optional. Type a value or use a button below.": "Это поле необязательно. Введите значение или используйте кнопку ниже.",
+        "To Create a New User Follow The Procedure": "Для создания пользователя следуйте инструкции",
+        "To Edit an Existing User Follow The Procedure": "Для изменения пользователя следуйте инструкции",
+        "To Delete an Existing User Follow The Procedure": "Для удаления пользователя следуйте инструкции",
+        "This Command Guides You Through The Process": "Команда проведёт вас по всем шагам",
+        "You Can Use Markdown": "Можно использовать Markdown", "Yes, Delete It": "Да, удалить",
+        "Client ID": "ID клиента", "Inbounds": "Входящие подключения", "Secrets": "Секреты",
+        "Error Editing User": "Ошибка изменения пользователя", "Links": "Ссылки", "Add User": "Добавить пользователя",
+        "Enabled months are shown with": "Включённые месяцы отмечены:", "Optional": "Необязательно",
+        "Dad": "Отец", "Uncle": "Дядя", "Friend": "Друг", "Max": "Максимум",
+        "Type a value or use a button below": "Введите значение или используйте кнопку ниже",
+        "Card holder updated": "Владелец карты обновлён", "S-UI client": "Клиент S-UI",
+        "Registered": "Зарегистрировано", "Selected": "Выбрано", "Delete It": "Удалить", "Edit": "Изменить",
+        "User(s)": "Пользователи", "Restore a SUI Bot Backup": "Восстановление резервной копии SUI Bot",
+        "Create one validated file containing assignments, user language choices, metrics, runtime settings, and cached bot data.": "Создайте один проверенный файл с привязками, языками пользователей, метриками, рабочими настройками и кэшем бота.",
+        "Send the `.sui-backup.json` document": "Отправьте документ `.sui-backup.json`",
+        "The bot validates its format, checksum, size, and allowed data sections before restoring it.": "Перед восстановлением бот проверяет формат, контрольную сумму, размер и разрешённые разделы данных.",
+    },
+    "zh": {
+        "Send the `.sui-backup.json` file now.": "请立即发送 `.sui-backup.json` 文件。",
+        "Use `-` to clear holder name.": "发送 `-` 可清空持卡人姓名。", "Enter 12-19 digits.": "请输入 12 至 19 位数字。",
+        "max 80 chars": "最多 80 个字符", "Usage": "用法", "Select exactly one Telegram account": "请选择一个 Telegram 账户",
+        "Telegram account selected": "已选择 Telegram 账户", "Confirm": "确认",
+        "This user selection is no longer active": "此用户选择已失效",
+        "The person must start the bot before it can send them messages": "对方必须先启动机器人，机器人才能向其发送消息",
+        "Interactive assignment canceled": "交互式绑定已取消", "Unblocked": "已解除屏蔽",
+        "Enter a whole number from 1 to 3650": "请输入 1 至 3650 的整数", "Operation canceled": "操作已取消",
+        "Creating SUI Bot backup": "正在创建 SUI Bot 备份", "Invalid response from server": "服务器响应无效",
+        "S-UI client selected": "已选择 S-UI 客户端", "Use the Telegram account picker sent below": "请使用下方发送的 Telegram 账户选择器",
+        "Choose one Telegram account. Telegram only shows accounts it allows you to share with this bot.": "请选择一个 Telegram 账户。Telegram 只会显示允许与此机器人共享的账户。",
+        "The selected S-UI client no longer exists": "所选 S-UI 客户端已不存在",
+        "Created and last-online timestamps will use this timezone": "创建时间和最后在线时间将使用此时区",
+        "This field is optional. Type a value or use a button below.": "此字段可选。请输入值或使用下方按钮。",
+        "To Create a New User Follow The Procedure": "请按以下步骤创建新用户", "To Edit an Existing User Follow The Procedure": "请按以下步骤编辑用户",
+        "To Delete an Existing User Follow The Procedure": "请按以下步骤删除用户", "This Command Guides You Through The Process": "此命令将引导您完成整个流程",
+        "You Can Use Markdown": "可以使用 Markdown", "Yes, Delete It": "是，删除", "Client ID": "客户端 ID",
+        "Inbounds": "入站", "Secrets": "密钥", "Error Editing User": "编辑用户时出错", "Links": "链接", "Add User": "添加用户",
+        "Enabled months are shown with": "已启用月份标有：", "Optional": "可选", "Dad": "父亲", "Uncle": "叔叔", "Friend": "朋友",
+        "Max": "最大", "Type a value or use a button below": "请输入值或使用下方按钮",
+        "Card holder updated": "持卡人已更新", "S-UI client": "S-UI 客户端", "Registered": "已注册",
+        "Selected": "已选择", "Delete It": "删除", "Edit": "编辑", "User(s)": "用户",
+        "Restore a SUI Bot Backup": "恢复 SUI Bot 备份",
+        "Create one validated file containing assignments, user language choices, metrics, runtime settings, and cached bot data.": "创建一个经过验证的文件，其中包含绑定、用户语言选择、指标、运行时设置和机器人缓存数据。",
+        "Send the `.sui-backup.json` document": "发送 `.sui-backup.json` 文档",
+        "The bot validates its format, checksum, size, and allowed data sections before restoring it.": "恢复前，机器人会验证格式、校验和、大小及允许的数据部分。",
+    },
+}
+
+for _language, _phrases in STRICT_UI_PHRASES.items():
+    PHRASES[_language].update(_phrases)
+
 SOURCE_ALIASES = {
     "✅ رسید شما برای ادمین ارسال شد.\nمنتظر تایید باشید.": "✅ Your receipt was sent to the administrator. Please wait for approval.",
     "لطفا مبلغ مشخص شده رو به شماره کارت بالا واریز کنید و تصویر رسید رو اینجا ارسال کنید.": "Please pay the displayed amount to the card above and send the receipt image here.",
@@ -297,6 +401,10 @@ SOURCE_ALIASES = {
 }
 
 _DYNAMIC_VALUE_RE = re.compile(r"\ue100([A-Za-z0-9_-]+)\ue101")
+# Slash commands are Telegram protocol identifiers, not natural-language UI.
+# Protect only standalone command tokens, not URL path components.
+_BOT_COMMAND_RE = re.compile(r"(?<![\w/])/[A-Za-z][A-Za-z0-9_]*(?:@[A-Za-z0-9_]+)?")
+_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 DEFAULT_BRAND_ALIASES = ("S-UI Bot", "SUI Bot", "ربات SUI")
 
 
@@ -313,9 +421,10 @@ def ltr_isolate(value: Any) -> str:
 
 def copyable_ltr_code(value: Any) -> str:
     """Render a safe Telegram inline-code value that stays LTR and is tap-copyable."""
-    # Isolates sit outside the code entity: Telegram displays it LTR while the
-    # copied entity contains only the original value, without invisible marks.
-    return f"\u2066<code>{html.escape(str(value))}</code>\u2069"
+    # Telegram mobile has inconsistent LRI/PDI handling around inline code in
+    # RTL paragraphs. Legacy LRM marks are handled consistently. They remain
+    # outside the code entity, so tapping copies only the original value.
+    return f"\u200e<code>{html.escape(str(value))}</code>\u200e"
 
 
 def _restore_dynamic_text(text: str) -> str:
@@ -330,7 +439,8 @@ def _restore_dynamic_text(text: str) -> str:
 def localize_outgoing_text(language: str, text: str | None, *, display_name: str | None = None) -> str | None:
     if not text:
         return text
-    result = text
+    result = _URL_RE.sub(lambda match: preserve_dynamic_text(match.group(0)), text)
+    result = _BOT_COMMAND_RE.sub(lambda match: preserve_dynamic_text(match.group(0)), result)
     if language != "en":
         for source, english in SOURCE_ALIASES.items():
             result = result.replace(source, english)

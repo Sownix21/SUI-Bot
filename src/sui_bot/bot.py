@@ -11,6 +11,7 @@ import signal
 import string
 import uuid
 import html
+import warnings
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from functools import wraps
@@ -35,6 +36,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.helpers import escape_markdown
 from telegram.request import HTTPXRequest
+from telegram.warnings import PTBUserWarning
 
 from .backup import BackupTooLargeError, stream_response_to_file, validate_sqlite_database
 from .backup_bundle import MAX_BUNDLE_BYTES, build_bundle, load_bundle, restore_bundle, write_bundle
@@ -62,7 +64,13 @@ from .outgoing_localization import (
     localize_outgoing_text,
     preserve_dynamic_text,
 )
-from .sui_metadata import build_subscription_urls, build_web_panel_url, extract_load_metadata, replace_url_origin
+from .sui_metadata import (
+    build_subscription_urls,
+    build_web_panel_url,
+    extract_load_metadata,
+    extract_partial_metadata,
+    replace_url_origin,
+)
 
 try:
     import redis.asyncio as redis
@@ -614,9 +622,11 @@ class APIClient:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def get(self, endpoint: str, params = None):
+    async def get(self, endpoint: str, params=None, *, attempts: int | None = None, log_failure: bool = True):
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        for attempt in range(1, API_GET_ATTEMPTS + 1):
+        attempt_limit = API_GET_ATTEMPTS if attempts is None else max(1, min(attempts, API_GET_ATTEMPTS))
+        log = logger.warning if log_failure else logger.debug
+        for attempt in range(1, attempt_limit + 1):
             await self.ensure_session()
             try:
                 async with self.session.get(
@@ -634,8 +644,8 @@ class APIClient:
                 raise
             except aiohttp.ClientResponseError as exc:
                 retryable = exc.status in {408, 425, 429} or exc.status >= 500
-                if not retryable or attempt == API_GET_ATTEMPTS:
-                    logger.warning(
+                if not retryable or attempt == attempt_limit:
+                    log(
                         "S-UI GET %s failed with HTTP %s%s",
                         endpoint, exc.status,
                         f" after {attempt} attempts" if retryable else "",
@@ -644,10 +654,10 @@ class APIClient:
                 delay = 0.5 * (2 ** (attempt - 1))
                 await asyncio.sleep(delay)
             except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                if attempt == API_GET_ATTEMPTS:
-                    logger.warning(
+                if attempt == attempt_limit:
+                    log(
                         "S-UI GET %s failed after %s attempts (%s): %s",
-                        endpoint, API_GET_ATTEMPTS, type(exc).__name__, exc,
+                        endpoint, attempt_limit, type(exc).__name__, exc,
                     )
                     return None
                 delay = 0.5 * (2 ** (attempt - 1))
@@ -1030,20 +1040,34 @@ def save_cached_inbounds(inbounds):
 async def refresh_server_metadata() -> bool:
     """Refresh subscription URI and inbounds together from ``/apiv2/load``."""
     global inbounds_cache, inbounds_cache_time
-    data = await api_client.get('apiv2/load')
-    if not data or not data.get("success"):
-        logger.error("S-UI metadata refresh failed: /apiv2/load returned no successful response")
-        return False
+    data = await api_client.get('apiv2/load', attempts=1, log_failure=False)
+    load_error: ValueError | None = None
+    if data:
+        try:
+            sub_uri, inbounds = extract_load_metadata(data)
+            source = "/apiv2/load"
+        except ValueError as exc:
+            load_error = exc
+            data = None
     try:
-        sub_uri, inbounds = extract_load_metadata(data)
+        if not data:
+            settings_data, inbounds_data = await asyncio.gather(
+                api_client.get('apiv2/settings'),
+                api_client.get('apiv2/inbounds'),
+            )
+            sub_uri, inbounds = extract_partial_metadata(settings_data, inbounds_data, api_client.base_url)
+            source = "/apiv2/settings + /apiv2/inbounds fallback"
     except ValueError as exc:
-        logger.error("Invalid S-UI /apiv2/load response: %s", exc)
+        if load_error:
+            logger.error("S-UI metadata refresh failed (load: %s; fallback: %s)", load_error, exc)
+        else:
+            logger.error("S-UI metadata refresh failed: %s", exc)
         return False
     save_cached_sub_uri(sub_uri)
     inbounds_cache = inbounds
     inbounds_cache_time = datetime.now().timestamp()
     save_cached_inbounds(inbounds)
-    logger.info("Refreshed subURI and %s inbound(s) from /apiv2/load", len(inbounds))
+    logger.info("Refreshed subURI and %s inbound(s) from %s", len(inbounds), source)
     return True
 
 
@@ -1241,7 +1265,11 @@ def format_client(client: dict, is_admin: bool = False, user_id: int | None = No
     lines.append(f"{tr(uid, 'total_usage')}: {format_bytes(total_used)}")
     volume_str = tr(uid, "unlimited") if volume == 0 else format_bytes(volume)
     lines.append(f"{tr(uid, 'total_volume')}: {volume_str}")
-    lines.append(f"{tr(uid, 'expiry')}: {localized_remaining_time(expiry, uid)}")
+    if expiry == 0 and client.get("delayStart") and not client.get("autoReset"):
+        expiry_text = tr(uid, "delayed_expiry_value", days=max(1, int(client.get("resetDays", 0) or 0)))
+    else:
+        expiry_text = localized_remaining_time(expiry, uid)
+    lines.append(f"{tr(uid, 'expiry')}: {expiry_text}")
 
     if is_admin:
         description = preserve_dynamic_text(client["desc"]) if client.get("desc") else "N/A"
@@ -1350,6 +1378,11 @@ def format_money(amount: int) -> str:
 def payment_price_steps() -> tuple[int, int]:
     return (10_000, 50_000) if PAYMENT_CURRENCY == "TOMAN" else (1, 10)
 
+
+def localized_currency_name(user_id: int, currency: str | None = None) -> str:
+    selected = (currency or PAYMENT_CURRENCY).lower()
+    return tr(user_id, f"currency_{selected}")
+
 def build_settings_menu_text() -> str:
     return (
         "⚙️ Admin Settings\n\n"
@@ -1358,18 +1391,18 @@ def build_settings_menu_text() -> str:
 
 
 def build_payment_settings_text() -> str:
-    months_text = ", ".join(f"{m}M" for m in get_renewal_month_options())
+    months_text = ", ".join(str(m) for m in get_renewal_month_options())
     holder_line = (
-        f"\n👤 Card Holder: {preserve_dynamic_text(PAYMENT_CARD_HOLDER)}"
+        f"\n{tr(ADMIN_TELEGRAM_ID, 'payment_card_holder', holder=preserve_dynamic_text(PAYMENT_CARD_HOLDER))}"
         if PAYMENT_CARD_HOLDER else ""
     )
     card_number = preserve_dynamic_text(ltr_isolate(PAYMENT_CARD_NUMBER))
     return (
         f"{tr(ADMIN_TELEGRAM_ID, 'payments_and_renewal')}\n\n"
-        f"💰 Price Per Month: {format_money(RENEWAL_MONTHLY_PRICE)}\n"
-        f"🌍 Currency: {PAYMENT_CURRENCIES[PAYMENT_CURRENCY]}\n"
-        f"📦 Enabled Renewal Options: {months_text}\n"
-        f"🏦 Card Number: {card_number}{holder_line}"
+        f"{tr(ADMIN_TELEGRAM_ID, 'price_per_month_value', amount=preserve_dynamic_text(format_money(RENEWAL_MONTHLY_PRICE)))}\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'payment_currency_value', currency=localized_currency_name(ADMIN_TELEGRAM_ID))}\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'enabled_renewal_options', options=preserve_dynamic_text(months_text))}\n"
+        f"{tr(ADMIN_TELEGRAM_ID, 'payment_card_number', number=card_number)}{holder_line}"
     )
 
 
@@ -1406,15 +1439,15 @@ def build_settings_menu_keyboard():
 def build_payment_settings_keyboard():
     small_step, large_step = payment_price_steps()
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Renewal Plans", callback_data='settings_plans')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "renewal_plans"), callback_data='settings_plans')],
         [InlineKeyboardButton(f"➖ {small_step:,}", callback_data=f'settings_price_minus_{small_step}'), InlineKeyboardButton(f"➕ {small_step:,}", callback_data=f'settings_price_plus_{small_step}')],
         [InlineKeyboardButton(f"➖ {large_step:,}", callback_data=f'settings_price_minus_{large_step}'), InlineKeyboardButton(f"➕ {large_step:,}", callback_data=f'settings_price_plus_{large_step}')],
-        [InlineKeyboardButton("🌍 Set Currency", callback_data='settings_currency')],
-        [InlineKeyboardButton("💰 Set Exact Monthly Price", callback_data='settings_set_monthly_price')],
-        [InlineKeyboardButton("💳 Set Card Number", callback_data='settings_set_card_number')],
-        [InlineKeyboardButton("👤 Set Card Holder", callback_data='settings_set_card_holder')],
-        [InlineKeyboardButton("🔁 Reset Plans (1,2,3)", callback_data='settings_plans_reset')],
-        [InlineKeyboardButton("🔙 Back To Settings", callback_data='admin_settings')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_currency"), callback_data='settings_currency')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_exact_monthly_price"), callback_data='settings_set_monthly_price')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_card_number"), callback_data='settings_set_card_number')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_card_holder"), callback_data='settings_set_card_holder')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "reset_plans"), callback_data='settings_plans_reset')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "back_to_settings"), callback_data='admin_settings')],
     ])
 
 
@@ -1678,10 +1711,14 @@ async def settings_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if query.data == "settings_set_monthly_price":
         await query.edit_message_text(
-            f"💰 Enter the exact monthly price in {PAYMENT_CURRENCY}.\n"
-            "Use a whole positive number. Currency conversion is not automatic.\n\n"
-            "Cancel: /cancel",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='settings_payments')]])
+            tr(
+                query.from_user.id,
+                "monthly_price_prompt",
+                currency=preserve_dynamic_text(PAYMENT_CURRENCY),
+            ),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(tr(query.from_user.id, "back"), callback_data='settings_payments')
+            ]]),
         )
         return SETTINGS_MONTHLY_PRICE
 
@@ -1765,6 +1802,26 @@ async def settings_display_name_input(update: Update, context: ContextTypes.DEFA
 
 async def settings_card_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Settings edit canceled.", reply_markup=build_settings_menu_keyboard())
+    return ConversationHandler.END
+
+
+async def settings_navigation_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """End an abandoned settings editor before navigating elsewhere."""
+    query = update.callback_query
+    await localized_query_answer(query)
+    if query.data == 'settings_payments':
+        await query.edit_message_text(build_payment_settings_text(), reply_markup=build_payment_settings_keyboard())
+    elif query.data == 'settings_admin_tools':
+        await query.edit_message_text(
+            build_admin_tools_settings_text(), reply_markup=build_admin_tools_settings_keyboard()
+        )
+    elif query.data == 'admin_settings':
+        await query.edit_message_text(build_settings_menu_text(), reply_markup=build_settings_menu_keyboard())
+    else:
+        await query.edit_message_text(
+            tr(query.from_user.id, "welcome"),
+            reply_markup=get_main_menu_keyboard(True, query.from_user.id),
+        )
     return ConversationHandler.END
 
 
@@ -1959,12 +2016,16 @@ async def settings_monthly_price_input(update: Update, context: ContextTypes.DEF
     except ValueError:
         value = 0
     if not 1 <= value <= 10**15:
-        await update.message.reply_text("❌ Enter a whole positive number (maximum 1,000,000,000,000,000).")
+        await update.message.reply_text(tr(update.effective_user.id, "monthly_price_invalid"))
         return SETTINGS_MONTHLY_PRICE
     RENEWAL_MONTHLY_PRICE = value
     save_runtime_setting("RENEWAL_MONTHLY_PRICE", str(value), RUNTIME_SETTINGS_FILE)
     await update.message.reply_text(
-        f"✅ Monthly price updated: {format_money(value)}",
+        tr(
+            update.effective_user.id,
+            "monthly_price_updated",
+            amount=preserve_dynamic_text(format_money(value)),
+        ),
         reply_markup=build_payment_settings_keyboard(),
     )
     return ConversationHandler.END
@@ -1976,7 +2037,7 @@ def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     if is_admin:
         keyboard.extend([
             [InlineKeyboardButton(tr(uid, "all_users"), callback_data='all_clients_page_1'), InlineKeyboardButton(tr(uid, "online_users"), callback_data='online_users')],
-            [InlineKeyboardButton(preserve_dynamic_text("💻 Server Status"), callback_data='server_status'), InlineKeyboardButton(tr(uid, "bot_stats"), callback_data='bot_stats')],
+            [InlineKeyboardButton(tr(uid, "server_status"), callback_data='server_status'), InlineKeyboardButton(tr(uid, "bot_stats"), callback_data='bot_stats')],
             [InlineKeyboardButton(tr(uid, "links"), callback_data='manage_links'), InlineKeyboardButton(tr(uid, "broadcast"), callback_data='broadcast_message')],
             [InlineKeyboardButton(tr(uid, "inactive_users"), callback_data='check_inactive_users'), InlineKeyboardButton(tr(uid, "delete_user"), callback_data='delete_user_prompt')],
             [InlineKeyboardButton(tr(uid, "create_user"), callback_data='create_user_prompt'), InlineKeyboardButton(tr(uid, "edit_user"), callback_data='edit_user_prompt')],
@@ -2476,8 +2537,9 @@ async def create_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(
                 "✅ Expiry: Unlimited\n\n"
                 "📝 Input Description:\n"
-                "(Example: Dad, Uncle, Friend)\n\n"
-                "Abort: /cancel"
+                "(Optional; example: Dad, Uncle, Friend)\n\n"
+                "Abort: /cancel",
+                reply_markup=create_optional_field_keyboard('desc'),
             )
             return CREATE_USER_DESC
     else:
@@ -2492,77 +2554,153 @@ async def create_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(
                 f"✅ Expiry: {days} Days\n\n"
                 "📝 Input Description:\n"
-                "(Example: Dad, Uncle, Friend)\n\n"
-                "Abort: /cancel"
+                "(Optional; example: Dad, Uncle, Friend)\n\n"
+                "Abort: /cancel",
+                reply_markup=create_optional_field_keyboard('desc'),
             )
             return CREATE_USER_DESC
         except ValueError:
             await update.message.reply_text("❌ Wrong Format , Input Numbers Only:")
             return CREATE_USER_EXPIRY
 
+def create_optional_field_keyboard(field: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "leave_empty"), callback_data=f'create_{field}_empty')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "cancel"), callback_data='create_cancel')],
+    ])
+
+
+def edit_optional_field_keyboard(field: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "keep_current"), callback_data=f'edit_{field}_keep')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "clear_value"), callback_data=f'edit_{field}_empty')],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "cancel"), callback_data='edit_cancel')],
+    ])
+
+
 async def create_user_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    desc = update.message.text.strip()
-    if not desc:
-        await update.message.reply_text("❌ Description Can't Be Empty :")
-        return CREATE_USER_DESC
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'create_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data != 'create_desc_empty':
+            return CREATE_USER_DESC
+        desc = ''
+        response = query
+    else:
+        desc = update.message.text.strip()
+        response = update.message
     if len(desc) > MAX_DESC_LEN:
         await update.message.reply_text(f"❌ Description Must Be At Most {MAX_DESC_LEN} Characters.")
         return CREATE_USER_DESC
     context.user_data['new_client_desc'] = desc
-    await update.message.reply_text(
-        f"✅ Description: {desc}\n\n"
+    text = (
+        f"✅ Description: {desc or 'Empty'}\n\n"
         "👥 Type a group name:\n"
-        f"(Maximum {MAX_GROUP_LEN} characters)\n\n"
+        f"(Optional; maximum {MAX_GROUP_LEN} characters)\n\n"
         "Abort: /cancel"
     )
+    if update.callback_query:
+        await response.edit_message_text(text, reply_markup=create_optional_field_keyboard('group'))
+    else:
+        await response.reply_text(text, reply_markup=create_optional_field_keyboard('group'))
     return CREATE_USER_GROUP
 
 async def create_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group = update.message.text.strip()
-    if not group:
-        await update.message.reply_text("❌ Group cannot be empty. Type a group name:")
-        return CREATE_USER_GROUP
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'create_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data != 'create_group_empty':
+            return CREATE_USER_GROUP
+        group = ''
+        response = query
+    else:
+        group = update.message.text.strip()
+        response = update.message
     if len(group) > MAX_GROUP_LEN:
         await update.message.reply_text(f"❌ Group must be at most {MAX_GROUP_LEN} characters.")
         return CREATE_USER_GROUP
     context.user_data['new_client_group'] = group
-    await update.message.reply_text(
-        f"✅ Group: {group}\n\n"
+    text = (
+        f"✅ Group: {group or 'Empty'}\n\n"
         "🗒️ Enter an administrative remark.\n"
-        "This is separate from the user description. Send '.' for no remark.\n\n"
+        "This is optional and separate from the user description.\n\n"
         "Abort: /cancel"
     )
+    if update.callback_query:
+        await response.edit_message_text(text, reply_markup=create_optional_field_keyboard('remark'))
+    else:
+        await response.reply_text(text, reply_markup=create_optional_field_keyboard('remark'))
     return CREATE_USER_REMARK
 
 
-def lifecycle_keyboard(prefix: str, include_keep: bool = False) -> InlineKeyboardMarkup:
+def lifecycle_keyboard(prefix: str, include_keep: bool = False, user_id: int | None = None) -> InlineKeyboardMarkup:
+    uid = ADMIN_TELEGRAM_ID if user_id is None else user_id
     rows = []
     if include_keep:
-        rows.append([InlineKeyboardButton("🛡️ Keep Current Policy", callback_data=f'{prefix}_lifecycle_keep')])
+        rows.append([InlineKeyboardButton(tr(uid, "lifecycle_keep"), callback_data=f'{prefix}_lifecycle_keep')])
     rows.extend([
-        [InlineKeyboardButton("⏱️ Expiry Countdown Already Started", callback_data=f'{prefix}_lifecycle_regular')],
-        [InlineKeyboardButton("🚀 Start Expiry On First Connection", callback_data=f'{prefix}_lifecycle_delayed_expiry')],
-        [InlineKeyboardButton("🔁 Auto-reset Usage From Now", callback_data=f'{prefix}_lifecycle_reset_now')],
-        [InlineKeyboardButton("🔁 Auto-reset Usage From First Connection", callback_data=f'{prefix}_lifecycle_reset_first')],
+        [InlineKeyboardButton(tr(uid, "lifecycle_standard"), callback_data=f'{prefix}_lifecycle_regular')],
+        [InlineKeyboardButton(tr(uid, "lifecycle_delayed"), callback_data=f'{prefix}_lifecycle_delayed_expiry')],
+        [InlineKeyboardButton(tr(uid, "lifecycle_reset_now"), callback_data=f'{prefix}_lifecycle_reset_now')],
+        [InlineKeyboardButton(tr(uid, "lifecycle_reset_first"), callback_data=f'{prefix}_lifecycle_reset_first')],
         [InlineKeyboardButton("❌ Abort", callback_data=f'{prefix}_cancel')],
     ])
     return InlineKeyboardMarkup(rows)
 
 
+def lifecycle_fields(policy: str, days: int, now_timestamp: int | None = None) -> dict[str, int | bool]:
+    """Return S-UI lifecycle fields matching ClientService.ResetClients semantics."""
+    if policy == 'regular':
+        return {"delayStart": False, "autoReset": False, "resetDays": 0, "nextReset": 0}
+    if not 1 <= days <= 3650:
+        raise ValueError("lifecycle days must be between 1 and 3650")
+    if policy == 'delayed_expiry':
+        return {"delayStart": True, "autoReset": False, "resetDays": days, "nextReset": 0}
+    if policy == 'reset_first':
+        return {"delayStart": True, "autoReset": True, "resetDays": days, "nextReset": 0}
+    if policy == 'reset_now':
+        base = now_timestamp if now_timestamp is not None else int(datetime.now(timezone.utc).timestamp())
+        return {
+            "delayStart": False,
+            "autoReset": True,
+            "resetDays": days,
+            "nextReset": base + days * 24 * 60 * 60,
+        }
+    raise ValueError("unsupported lifecycle policy")
+
+
 async def create_user_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remark = update.message.text.strip()
-    if remark == '.':
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'create_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data != 'create_remark_empty':
+            return CREATE_USER_REMARK
         remark = ''
+        response = query
+    else:
+        remark = update.message.text.strip()
+        response = update.message
     if len(remark) > MAX_REMARK_LEN:
         await update.message.reply_text(f"❌ Remark must be at most {MAX_REMARK_LEN} characters.")
         return CREATE_USER_REMARK
     context.user_data['new_client_remark'] = remark
-    await update.message.reply_text(
-        "⚙️ Choose the expiry/reset policy.\n\n"
-        "Delayed expiry starts its countdown after the first successful VPN traffic. "
-        "Auto-reset clears current usage at the configured interval; historical totals remain tracked.",
-        reply_markup=lifecycle_keyboard('create'),
-    )
+    text = tr(update.effective_user.id, "lifecycle_create_help")
+    if update.callback_query:
+        await response.edit_message_text(text, reply_markup=lifecycle_keyboard('create', user_id=update.effective_user.id))
+    else:
+        await response.reply_text(text, reply_markup=lifecycle_keyboard('create', user_id=update.effective_user.id))
     return CREATE_USER_LIFECYCLE
 
 
@@ -2575,17 +2713,17 @@ async def create_user_lifecycle(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     policy = query.data.removeprefix('create_lifecycle_')
     if policy == 'regular':
-        context.user_data.update(new_client_delay_start=False, new_client_auto_reset=False,
-                                 new_client_reset_days=0, new_client_next_reset=0)
+        fields = lifecycle_fields('regular', 0)
+        context.user_data.update(
+            new_client_delay_start=fields['delayStart'], new_client_auto_reset=fields['autoReset'],
+            new_client_reset_days=fields['resetDays'], new_client_next_reset=fields['nextReset'],
+        )
         return await finish_create_user(query, context)
     if policy not in {'delayed_expiry', 'reset_now', 'reset_first'}:
         return CREATE_USER_LIFECYCLE
     context.user_data['new_client_policy'] = policy
-    prompt = (
-        "Enter the number of subscription days starting from first connection:"
-        if policy == 'delayed_expiry'
-        else "Enter the number of days between automatic usage resets:"
-    )
+    prompt_key = "lifecycle_delayed_prompt" if policy == 'delayed_expiry' else "lifecycle_reset_prompt"
+    prompt = tr(query.from_user.id, prompt_key)
     await query.edit_message_text(f"⚙️ {prompt}\n\nAbort: /cancel")
     return CREATE_USER_RESET_DAYS
 
@@ -2599,18 +2737,13 @@ async def create_user_reset_days(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Enter a whole number from 1 to 3650:")
         return CREATE_USER_RESET_DAYS
     policy = context.user_data['new_client_policy']
+    fields = lifecycle_fields(policy, days)
     if policy == 'delayed_expiry':
-        context.user_data.update(new_client_expiry=0, new_client_delay_start=True,
-                                 new_client_auto_reset=False, new_client_reset_days=days,
-                                 new_client_next_reset=0)
-    else:
-        starts_on_first_connection = policy == 'reset_first'
-        next_reset = 0 if starts_on_first_connection else int(
-            (datetime.now(timezone.utc) + timedelta(days=days)).timestamp()
-        )
-        context.user_data.update(new_client_delay_start=starts_on_first_connection,
-                                 new_client_auto_reset=True, new_client_reset_days=days,
-                                 new_client_next_reset=next_reset)
+        context.user_data['new_client_expiry'] = 0
+    context.user_data.update(
+        new_client_delay_start=fields['delayStart'], new_client_auto_reset=fields['autoReset'],
+        new_client_reset_days=fields['resetDays'], new_client_next_reset=fields['nextReset'],
+    )
     return await finish_create_user(update.message, context)
 
 
@@ -2627,22 +2760,23 @@ async def finish_create_user(message, context: ContextTypes.DEFAULT_TYPE):
     reset_days = context.user_data.get('new_client_reset_days', 0)
     next_reset = context.user_data.get('new_client_next_reset', 0)
     volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
-    expiry_str = "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
-    selected_names = [get_inbound_display_name(i) for i in inbounds]
-    policy_text = (
-        f"Delayed expiry ({reset_days} days from first connection)" if delay_start and not auto_reset
-        else f"Auto-reset every {reset_days} days ({'from first connection' if delay_start else 'from now'})"
-        if auto_reset else "Regular expiry"
+    expiry_str = (
+        tr(ADMIN_TELEGRAM_ID, "delayed_expiry_value", days=reset_days)
+        if expiry == 0 and delay_start and not auto_reset
+        else "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
     )
+    empty_text = tr(ADMIN_TELEGRAM_ID, "empty_value")
+    selected_names = [get_inbound_display_name(i) for i in inbounds]
+    policy_text = lifecycle_policy_text(delay_start, auto_reset, reset_days, ADMIN_TELEGRAM_ID)
     progress_text = (
         "⏳ Creating User...\n\n"
         f"👤 Username: {name}\n"
         f"📡 Inbounds: {', '.join(selected_names)}\n"
         f"💾 Volume: {volume_str}\n"
         f"⏰ Expiry: {expiry_str}\n"
-        f"📝 Description: {desc}\n"
-        f"👥 Group: {group}\n"
-        f"🗒️ Remark: {remark or 'None'}\n"
+        f"📝 Description: {desc or empty_text}\n"
+        f"👥 Group: {group or empty_text}\n"
+        f"🗒️ Remark: {remark or empty_text}\n"
         f"⚙️ Policy: {policy_text}"
     )
     if hasattr(message, 'edit_message_text'):
@@ -2676,9 +2810,9 @@ async def finish_create_user(message, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Inbounds: {', '.join(selected_names)}\n"
             f"💾 Volume: {volume_str}\n"
             f"⏰ Expiry: {expiry_str}\n"
-            f"📝 Description: {desc}\n"
-            f"👥 Group: {group}\n"
-            f"🗒️ Remark: {remark or 'None'}\n"
+            f"📝 Description: {desc or empty_text}\n"
+            f"👥 Group: {group or empty_text}\n"
+            f"🗒️ Remark: {remark or empty_text}\n"
             f"⚙️ Policy: {policy_text}\n\n"
             "Main Menu: /start"
         )
@@ -2696,6 +2830,27 @@ async def create_user_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("❌ Creating User Aborted.", reply_markup=ReplyKeyboardRemove())
     context.user_data.clear()
     return ConversationHandler.END
+
+
+async def workflow_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel whichever single stateful workflow is currently active."""
+    context.user_data.clear()
+    await update.message.reply_text("❌ Operation canceled.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
+def mixed_conversation_handler(**kwargs) -> ConversationHandler:
+    """Build a mixed message/callback workflow without PTB's generic advisory."""
+    # This workflow intentionally keys state by chat and user, because it accepts
+    # both ordinary messages and callback queries. per_message=True cannot be used
+    # for mixed handlers. The advisory is understood and does not indicate a fault.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message\..*",
+            category=PTBUserWarning,
+        )
+        return ConversationHandler(**kwargs)
 
 async def delete_client(client_id: int) -> dict:
     await api_client.ensure_session()
@@ -2935,8 +3090,9 @@ async def edit_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "✅ Expiry: Unlimited\n\n"
                 "📝 Input New Description:\n"
                 f"(Default: `{current_desc}`)\n"
-                "To Keep Current Description Input ' . '\n\n"
-                "Abort: /cancel"
+                "This field is optional. Type a value or use a button below.\n\n"
+                "Abort: /cancel",
+                reply_markup=edit_optional_field_keyboard('desc'),
             )
             return EDIT_USER_DESC
     else:
@@ -2960,65 +3116,117 @@ async def edit_user_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Expiry: {calculate_remaining_time(context.user_data['edited_client_expiry'])}\n\n"
             "📝 Input New Description:\n"
             f"(Default: `{current_desc}`)\n"
-            "To Keep Current Description Input ' . '\n\n"
-            "Abort: /cancel"
+            "This field is optional. Type a value or use a button below.\n\n"
+            "Abort: /cancel",
+            reply_markup=edit_optional_field_keyboard('desc'),
         )
         return EDIT_USER_DESC
 
 async def edit_user_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    desc = update.message.text.strip()
-    original_desc = context.user_data['original_client_data'].get('desc')
-
-    if desc == '.':
-        desc = original_desc
-    elif not desc:
-        await update.message.reply_text("❌ Description Can't Be Empty:")
-        return EDIT_USER_DESC
-    elif len(desc) > MAX_DESC_LEN:
+    current_desc = str(context.user_data.get('edited_client_desc') or '')
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'edit_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data == 'edit_desc_keep':
+            desc = current_desc
+        elif query.data == 'edit_desc_empty':
+            desc = ''
+        else:
+            return EDIT_USER_DESC
+        response = query
+    else:
+        desc = update.message.text.strip()
+        if desc == '.':
+            desc = current_desc
+        response = update.message
+    if len(desc) > MAX_DESC_LEN:
         await update.message.reply_text(f"❌ Description Must Be At Most {MAX_DESC_LEN} Characters.")
         return EDIT_USER_DESC
 
     context.user_data['edited_client_desc'] = desc
 
     current_group = context.user_data['edited_client_group']
-    await update.message.reply_text(
-        f"✅ Description: {desc}\n\n"
+    text = (
+        f"✅ Description: {desc or 'Empty'}\n\n"
         "👥 Type a new group name:\n"
-        f"(Current: {current_group or 'empty'}; send '.' to keep it)\n"
-        f"(Maximum {MAX_GROUP_LEN} characters)\n\n"
+        f"(Current: {current_group or 'empty'})\n"
+        f"(Optional; maximum {MAX_GROUP_LEN} characters)\n\n"
         "Abort: /cancel"
     )
+    if update.callback_query:
+        await response.edit_message_text(text, reply_markup=edit_optional_field_keyboard('group'))
+    else:
+        await response.reply_text(text, reply_markup=edit_optional_field_keyboard('group'))
     return EDIT_USER_GROUP
 
 async def edit_user_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group = update.message.text.strip()
-    if group == '.':
-        group = str(context.user_data.get('edited_client_group') or '')
-    elif not group:
-        await update.message.reply_text("❌ Group cannot be empty. Type a group name or '.' to keep it:")
-        return EDIT_USER_GROUP
+    current_group = str(context.user_data.get('edited_client_group') or '')
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'edit_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data == 'edit_group_keep':
+            group = current_group
+        elif query.data == 'edit_group_empty':
+            group = ''
+        else:
+            return EDIT_USER_GROUP
+        response = query
+    else:
+        group = update.message.text.strip()
+        if group == '.':
+            group = current_group
+        response = update.message
     if len(group) > MAX_GROUP_LEN:
         await update.message.reply_text(f"❌ Group must be at most {MAX_GROUP_LEN} characters.")
         return EDIT_USER_GROUP
     context.user_data['edited_client_group'] = group
 
     current_remark = context.user_data.get('edited_client_remark', '')
-    await update.message.reply_text(
-        f"✅ Group: {group}\n\n"
+    text = (
+        f"✅ Group: {group or 'Empty'}\n\n"
         "🗒️ Enter a new administrative remark.\n"
         f"Current: {current_remark or 'empty'}\n"
-        "Send '.' to keep it or '-' to clear it.\n\n"
+        "This field is optional. Type a value or use a button below.\n\n"
         "Abort: /cancel"
     )
+    if update.callback_query:
+        await response.edit_message_text(text, reply_markup=edit_optional_field_keyboard('remark'))
+    else:
+        await response.reply_text(text, reply_markup=edit_optional_field_keyboard('remark'))
     return EDIT_USER_REMARK
 
 
 async def edit_user_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remark = update.message.text.strip()
-    if remark == '.':
-        remark = context.user_data.get('edited_client_remark', '')
-    elif remark == '-':
-        remark = ''
+    current_remark = str(context.user_data.get('edited_client_remark') or '')
+    if update.callback_query:
+        query = update.callback_query
+        await localized_query_answer(query)
+        if query.data == 'edit_cancel':
+            await query.edit_message_text("❌ Operation Aborted.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        if query.data == 'edit_remark_keep':
+            remark = current_remark
+        elif query.data == 'edit_remark_empty':
+            remark = ''
+        else:
+            return EDIT_USER_REMARK
+        response = query
+    else:
+        remark = update.message.text.strip()
+        if remark == '.':
+            remark = current_remark
+        elif remark == '-':
+            remark = ''
+        response = update.message
     if len(remark) > MAX_REMARK_LEN:
         await update.message.reply_text(f"❌ Remark must be at most {MAX_REMARK_LEN} characters.")
         return EDIT_USER_REMARK
@@ -3027,21 +3235,33 @@ async def edit_user_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['edited_client_delay_start'],
         context.user_data['edited_client_auto_reset'],
         context.user_data['edited_client_reset_days'],
+        update.effective_user.id,
     )
-    await update.message.reply_text(
-        f"⚙️ Choose the expiry/reset policy.\n\nCurrent: {current_policy}",
-        reply_markup=lifecycle_keyboard('edit', include_keep=True),
+    text = (
+        "⚙️ Choose the expiry/reset policy.\n\n"
+        f"Current: {current_policy}\n\n"
+        f"{tr(update.effective_user.id, 'lifecycle_edit_help')}"
     )
+    if update.callback_query:
+        await response.edit_message_text(
+            text, reply_markup=lifecycle_keyboard('edit', include_keep=True, user_id=update.effective_user.id)
+        )
+    else:
+        await response.reply_text(
+            text, reply_markup=lifecycle_keyboard('edit', include_keep=True, user_id=update.effective_user.id)
+        )
     return EDIT_USER_LIFECYCLE
 
 
-def lifecycle_policy_text(delay_start: bool, auto_reset: bool, reset_days: int) -> str:
+def lifecycle_policy_text(
+    delay_start: bool, auto_reset: bool, reset_days: int, user_id: int = ADMIN_TELEGRAM_ID
+) -> str:
     if delay_start and not auto_reset:
-        return f"Delayed expiry: {reset_days} days from first connection"
+        return tr(user_id, "lifecycle_policy_delayed", days=reset_days)
     if auto_reset:
-        origin = "first connection" if delay_start else "now/next scheduled reset"
-        return f"Auto-reset usage every {reset_days} days, starting from {origin}"
-    return "Regular expiry; no automatic usage reset"
+        key = "lifecycle_policy_reset_first" if delay_start else "lifecycle_policy_reset_now"
+        return tr(user_id, key, days=reset_days)
+    return tr(user_id, "lifecycle_policy_standard")
 
 
 async def prompt_edit_enable(message, context: ContextTypes.DEFAULT_TYPE):
@@ -3070,17 +3290,17 @@ async def edit_user_lifecycle(update: Update, context: ContextTypes.DEFAULT_TYPE
     if policy == 'keep':
         return await prompt_edit_enable(query, context)
     if policy == 'regular':
-        context.user_data.update(edited_client_delay_start=False, edited_client_auto_reset=False,
-                                 edited_client_reset_days=0, edited_client_next_reset=0)
+        fields = lifecycle_fields('regular', 0)
+        context.user_data.update(
+            edited_client_delay_start=fields['delayStart'], edited_client_auto_reset=fields['autoReset'],
+            edited_client_reset_days=fields['resetDays'], edited_client_next_reset=fields['nextReset'],
+        )
         return await prompt_edit_enable(query, context)
     if policy not in {'delayed_expiry', 'reset_now', 'reset_first'}:
         return EDIT_USER_LIFECYCLE
     context.user_data['edited_client_policy'] = policy
-    prompt = (
-        "Enter the number of subscription days starting from first connection:"
-        if policy == 'delayed_expiry'
-        else "Enter the number of days between automatic usage resets:"
-    )
+    prompt_key = "lifecycle_delayed_prompt" if policy == 'delayed_expiry' else "lifecycle_reset_prompt"
+    prompt = tr(query.from_user.id, prompt_key)
     await query.edit_message_text(f"⚙️ {prompt}\n\nAbort: /cancel")
     return EDIT_USER_RESET_DAYS
 
@@ -3094,18 +3314,13 @@ async def edit_user_reset_days(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Enter a whole number from 1 to 3650:")
         return EDIT_USER_RESET_DAYS
     policy = context.user_data['edited_client_policy']
+    fields = lifecycle_fields(policy, days)
     if policy == 'delayed_expiry':
-        context.user_data.update(edited_client_expiry=0, edited_client_delay_start=True,
-                                 edited_client_auto_reset=False, edited_client_reset_days=days,
-                                 edited_client_next_reset=0)
-    else:
-        starts_on_first_connection = policy == 'reset_first'
-        next_reset = 0 if starts_on_first_connection else int(
-            (datetime.now(timezone.utc) + timedelta(days=days)).timestamp()
-        )
-        context.user_data.update(edited_client_delay_start=starts_on_first_connection,
-                                 edited_client_auto_reset=True, edited_client_reset_days=days,
-                                 edited_client_next_reset=next_reset)
+        context.user_data['edited_client_expiry'] = 0
+    context.user_data.update(
+        edited_client_delay_start=fields['delayStart'], edited_client_auto_reset=fields['autoReset'],
+        edited_client_reset_days=fields['resetDays'], edited_client_next_reset=fields['nextReset'],
+    )
     return await prompt_edit_enable(update.message, context)
 
 async def edit_user_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3159,10 +3374,15 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_reset = context.user_data['edited_client_next_reset']
 
     volume_str = "♾️ Unlimited" if volume == 0 else format_bytes(volume)
-    expiry_str = "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
+    expiry_str = (
+        tr(query.from_user.id, "delayed_expiry_value", days=reset_days)
+        if expiry == 0 and delay_start and not auto_reset
+        else "♾️ Unlimited" if expiry == 0 else calculate_remaining_time(expiry)
+    )
+    empty_text = tr(query.from_user.id, "empty_value")
     selected_names = [get_inbound_display_name(i) for i in inbounds]
     enable_text = "✅ Enable" if enable else "❌ Disable"
-    policy_text = lifecycle_policy_text(delay_start, auto_reset, reset_days)
+    policy_text = lifecycle_policy_text(delay_start, auto_reset, reset_days, query.from_user.id)
 
     await query.edit_message_text(
         "⏳ Implementing Changes...\n\n"
@@ -3171,9 +3391,9 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 Inbounds: {', '.join(selected_names)}\n"
         f"💾 Volume: {volume_str}\n"
         f"⏰ Expiry: {expiry_str}\n"
-        f"📝 Description: {desc}\n"
-        f"👥 Group: {group}\n"
-        f"🗒️ Remark: {remark or 'None'}\n"
+        f"📝 Description: {desc or empty_text}\n"
+        f"👥 Group: {group or empty_text}\n"
+        f"🗒️ Remark: {remark or empty_text}\n"
         f"⚙️ Policy: {policy_text}\n"
         f"⚡ Status: {enable_text}\n"
         f"🔐 Secrets: {'Regenerated' if regenerate_secrets else 'Kept'}"
@@ -3210,9 +3430,9 @@ async def edit_user_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Inbounds: {', '.join(selected_names)}\n"
             f"💾 Volume: {volume_str}\n"
             f"⏰ Expiry: {expiry_str}\n"
-            f"📝 Description: {desc}\n"
-            f"👥 Group: {group}\n"
-            f"🗒️ Remark: {remark or 'None'}\n"
+            f"📝 Description: {desc or empty_text}\n"
+            f"👥 Group: {group or empty_text}\n"
+            f"🗒️ Remark: {remark or empty_text}\n"
             f"⚙️ Policy: {policy_text}\n"
             f"⚡ status: {enable_text}\n"
             f"🔐 Secrets: {'Regenerated' if regenerate_secrets else 'Kept'}\n\n"
@@ -3404,20 +3624,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == 'settings_currency':
             rows = [
                 [InlineKeyboardButton(
-                    f"{'✅ ' if key == PAYMENT_CURRENCY else ''}{label}",
+                    f"{'✅ ' if key == PAYMENT_CURRENCY else ''}{localized_currency_name(user_id, key)}",
                     callback_data=f"settings_currency_set_{key.lower()}",
                 )]
-                for key, label in PAYMENT_CURRENCIES.items()
+                for key in PAYMENT_CURRENCIES
             ]
-            rows.append([InlineKeyboardButton("🔙 Back", callback_data='settings_payments')])
+            rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data='settings_payments')])
             await query.edit_message_text(
-                "🌍 Payment Currency\n\nChanging currency changes the displayed unit only; review the monthly price afterwards.",
+                f"{tr(user_id, 'currency_title')}\n\n{tr(user_id, 'currency_help')}",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
         elif data.startswith('settings_currency_set_'):
             selected = data.removeprefix('settings_currency_set_').upper()
             if selected not in PAYMENT_CURRENCIES:
-                await localized_query_answer(query, "❌ Invalid currency.", show_alert=True)
+                await localized_query_answer(query, tr(user_id, "currency_invalid"), show_alert=True)
                 return
             PAYMENT_CURRENCY = selected
             save_runtime_setting("PAYMENT_CURRENCY", selected, RUNTIME_SETTINGS_FILE)
@@ -3425,7 +3645,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_payment_settings_text(), reply_markup=build_payment_settings_keyboard()
             )
             await localized_query_answer(
-                query, "✅ Currency updated. Confirm the monthly price.", show_alert=True
+                query, tr(user_id, "currency_updated"), show_alert=True
             )
         elif data == 'settings_connection_guides':
             await query.edit_message_text(
@@ -3719,7 +3939,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_payment_settings_text(),
                 reply_markup=build_payment_settings_keyboard()
             )
-            await localized_query_answer(query, f"✅ New monthly price: {format_money(RENEWAL_MONTHLY_PRICE)}", show_alert=False)
+            await localized_query_answer(
+                query,
+                tr(
+                    user_id,
+                    "new_monthly_price",
+                    amount=preserve_dynamic_text(format_money(RENEWAL_MONTHLY_PRICE)),
+                ),
+                show_alert=False,
+            )
         elif data == 'create_user_prompt':
             if user_id != ADMIN_TELEGRAM_ID:
                 await localized_query_answer(query, "❌ Only admin", show_alert=True)
@@ -3935,7 +4163,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{tr(user_id, 'renew_payment')}\n\n"
                 f"{tr(user_id, 'duration_value', months=months)}\n"
                 f"{tr(user_id, 'amount_value', amount_text=format_money(amount))}\n"
-                f"{tr(user_id, 'card_number_value', card_number=card_number)}{holder_line}\n\n"
+                f"{tr(user_id, 'card_number_value', card_number=card_number)}\n"
+                f"{tr(user_id, 'tap_card_to_copy')}{holder_line}\n\n"
                 f"{tr(user_id, 'payment_instructions')}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML",
@@ -3957,7 +4186,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # presses cannot apply the same renewal concurrently.
             req = pending_renew_requests.pop(request_id, None)
             if not req:
-                await localized_query_answer(query, "❌ Request not found or already handled.", show_alert=True)
+                await localized_query_answer(query, tr(user_id, "renew_request_missing"), show_alert=True)
                 return
 
             client_id = req["client_id"]
@@ -3999,43 +4228,49 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 global clients_cache, clients_cache_time
                 clients_cache = None
                 clients_cache_time = 0
-                new_days = calculate_remaining_time(new_expiry)
+                user_expiry = localized_remaining_time(new_expiry, user_tg_id)
+                admin_expiry = localized_remaining_time(new_expiry, user_id)
                 try:
                     await context.bot.send_message(
                         chat_id=user_tg_id,
-                        text=(
-                            f"✅ Renewal approved by admin.\n\n"
-                            f"📝 Subscription: {client_desc}\n"
-                            f"📦 Duration Added: {months} Month(s)\n"
-                            f"💰 Amount: {format_money(amount)}\n"
-                            f"🆔 Client ID: {client_id}\n"
-                            f"⏰ New Expiry: {new_days}"
-                        )
+                        text=tr(
+                            user_tg_id,
+                            "renew_user_approved",
+                            description=client_desc,
+                            months=months,
+                            amount=preserve_dynamic_text(format_money(amount)),
+                            client_id=client_id,
+                            expiry=user_expiry,
+                        ),
                     )
                 except Exception as e:
                     logger.error(f"Failed to notify user {user_tg_id} after renewal approval: {e}")
 
                 if query.message and (query.message.photo or query.message.document):
                     await query.edit_message_caption(
-                        caption=(
-                            f"✅ Renewal Approved\n\n"
-                            f"Request ID: {request_id}\n"
-                            f"User TG: {user_tg_id}\n"
-                            f"Client ID: {client_id}\n"
-                            f"Duration: {months} month(s)\n"
-                            f"Amount: {format_money(amount)}\n"
-                            f"New Expiry: {new_days}"
+                        caption=tr(
+                            user_id,
+                            "renew_admin_approved",
+                            request_id=preserve_dynamic_text(request_id),
+                            user_id=user_tg_id,
+                            client_id=client_id,
+                            months=months,
+                            amount=preserve_dynamic_text(format_money(amount)),
+                            expiry=admin_expiry,
                         )
                     )
                 else:
                     await query.edit_message_text(
-                        f"✅ Renewal Approved\n\n"
-                        f"Request ID: {request_id}\n"
-                        f"User TG: {user_tg_id}\n"
-                        f"Client ID: {client_id}\n"
-                        f"Duration: {months} month(s)\n"
-                        f"Amount: {format_money(amount)}\n"
-                        f"New Expiry: {new_days}"
+                        tr(
+                            user_id,
+                            "renew_admin_approved",
+                            request_id=preserve_dynamic_text(request_id),
+                            user_id=user_tg_id,
+                            client_id=client_id,
+                            months=months,
+                            amount=preserve_dynamic_text(format_money(amount)),
+                            expiry=admin_expiry,
+                        )
                     )
             else:
                 pending_renew_requests[request_id] = req
@@ -4051,37 +4286,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             request_id = data.split('_')[-1]
             req = pending_renew_requests.pop(request_id, None)
             if not req:
-                await localized_query_answer(query, "❌ Request not found or already handled.", show_alert=True)
+                await localized_query_answer(query, tr(user_id, "renew_request_missing"), show_alert=True)
                 return
             user_tg_id = req["user_tg_id"]
             client_id = req["client_id"]
             try:
                 await context.bot.send_message(
                     chat_id=user_tg_id,
-                    text=(
-                        f"❌ Renewal request rejected by admin.\n"
-                        f"🆔 Client ID: {client_id}\n"
-                        f"If needed, contact admin for details."
-                    )
+                    text=tr(user_tg_id, "renew_user_rejected", client_id=client_id)
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {user_tg_id} after renewal rejection: {e}")
 
             if query.message and (query.message.photo or query.message.document):
                 await query.edit_message_caption(
-                    caption=(
-                        f"❌ Renewal Rejected\n\n"
-                        f"Request ID: {request_id}\n"
-                        f"User TG: {user_tg_id}\n"
-                        f"Client ID: {client_id}"
+                    caption=tr(
+                        user_id,
+                        "renew_admin_rejected",
+                        request_id=preserve_dynamic_text(request_id),
+                        user_id=user_tg_id,
+                        client_id=client_id,
                     )
                 )
             else:
                 await query.edit_message_text(
-                    f"❌ Renewal Rejected\n\n"
-                    f"Request ID: {request_id}\n"
-                    f"User TG: {user_tg_id}\n"
-                    f"Client ID: {client_id}"
+                    tr(
+                        user_id,
+                        "renew_admin_rejected",
+                        request_id=preserve_dynamic_text(request_id),
+                        user_id=user_tg_id,
+                        client_id=client_id,
+                    )
                 )
         elif data.startswith('all_clients_page_'):
             if user_id != ADMIN_TELEGRAM_ID:
@@ -4282,8 +4517,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 preserve_dynamic_text(msg),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(preserve_dynamic_text("🔄 Refresh"), callback_data='server_status')],
-                    [InlineKeyboardButton(preserve_dynamic_text("🏠 Main Menu"), callback_data='main_menu')],
+                    [InlineKeyboardButton(tr(user_id, "refresh"), callback_data='server_status')],
+                    [InlineKeyboardButton(tr(user_id, "main_menu"), callback_data='main_menu')],
                 ]),
             )
         elif data == 'bot_stats':
@@ -4908,7 +5143,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
     amount = int(pending.get("amount", 0))
     if not client_id or months not in set(get_renewal_month_options()) or amount <= 0:
         context.user_data.pop('pending_renew_submission', None)
-        await update.message.reply_text("❌ Invalid renewal request state. Please start again from subscription menu.")
+        await update.message.reply_text(tr(user_id, "renew_invalid_state"))
         return
 
     if not user_has_client_access(user_id, client_id):
@@ -4925,7 +5160,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         media_type = "document"
         media_file_id = update.message.document.file_id
     else:
-        await update.message.reply_text("❌ Please send a payment screenshot/image.")
+        await update.message.reply_text(tr(user_id, "renew_send_image"))
         return
 
     request_id = secrets.token_hex(4)
@@ -4954,19 +5189,20 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Failed to fetch client details for renewal request: {e}")
 
-    caption = (
-        f"💳 New Renewal Request\n\n"
-        f"Request ID: {request_id}\n"
-        f"User TG: {user_id}\n"
-        f"Client ID: {client_id}\n"
-        f"Name: {client_name}\n"
-        f"Description: {client_desc}\n"
-        f"Duration: {months} month(s)\n"
-        f"Amount: {format_money(amount)}"
+    caption = tr(
+        ADMIN_TELEGRAM_ID,
+        "renew_admin_request",
+        request_id=preserve_dynamic_text(request_id),
+        user_id=user_id,
+        client_id=client_id,
+        name=client_name,
+        description=client_desc,
+        months=months,
+        amount=preserve_dynamic_text(format_money(amount)),
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Approve", callback_data=f"renew_appr_{request_id}")],
-        [InlineKeyboardButton("❌ Reject", callback_data=f"renew_rej_{request_id}")]
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "approve"), callback_data=f"renew_appr_{request_id}")],
+        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "reject"), callback_data=f"renew_rej_{request_id}")]
     ])
 
     try:
@@ -4987,7 +5223,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         pending_renew_requests.pop(request_id, None)
         logger.error(f"Failed to forward renewal receipt to admin: {e}")
-        await update.message.reply_text("❌ Failed to submit request to admin. Please try again.")
+        await update.message.reply_text(tr(user_id, "renew_submit_failed"))
         return
 
     await update.message.reply_text(tr(user_id, "receipt_sent"))
@@ -5934,84 +6170,23 @@ async def main():
         LocalizedExtBot(token=BOT_TOKEN, get_updates_request=polling_request)
     ).build()
 
-    create_user_conv = ConversationHandler(
-        entry_points=[CommandHandler('createuser', create_user_start)],
-        states={
-            CREATE_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_name)],
-            CREATE_USER_INBOUNDS: [CallbackQueryHandler(create_user_inbound_callback)],
-            CREATE_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_volume), CallbackQueryHandler(create_user_volume)],
-            CREATE_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_expiry), CallbackQueryHandler(create_user_expiry)],
-            CREATE_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_desc)],
-            CREATE_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_group)],
-            CREATE_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_remark)],
-            CREATE_USER_LIFECYCLE: [CallbackQueryHandler(create_user_lifecycle)],
-            CREATE_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_reset_days)],
-        },
-        fallbacks=[CommandHandler('cancel', create_user_cancel)],
-        allow_reentry=True
-    )
-
-    edit_user_conv = ConversationHandler(
-        entry_points=[CommandHandler('edituser', edit_user_start)],
-        states={
-            EDIT_USER_GET_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_get_id)],
-            EDIT_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_name)],
-            EDIT_USER_INBOUNDS: [CallbackQueryHandler(edit_user_inbound_callback)],
-            EDIT_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_volume), CallbackQueryHandler(edit_user_volume)],
-            EDIT_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_expiry), CallbackQueryHandler(edit_user_expiry)],
-            EDIT_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_desc)],
-            EDIT_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_group)],
-            EDIT_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_remark)],
-            EDIT_USER_LIFECYCLE: [CallbackQueryHandler(edit_user_lifecycle)],
-            EDIT_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_reset_days)],
-            EDIT_USER_ENABLE: [CallbackQueryHandler(edit_user_enable)],
-            EDIT_USER_REGEN: [CallbackQueryHandler(edit_user_regen)]
-        },
-        fallbacks=[CommandHandler('cancel', edit_user_cancel)],
-        allow_reentry=True
-    )
-
-    delete_user_conv = ConversationHandler(
-        entry_points=[CommandHandler('deleteuser', delete_user_start)],
-        states={
-            DELETE_USER_GET_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_user_get_id)],
-            DELETE_USER_CONFIRM: [CallbackQueryHandler(delete_user_confirm)]
-        },
-        fallbacks=[CommandHandler('cancel', delete_user_cancel)],
-        allow_reentry=True
-    )
-
-    broadcast_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern='^broadcast_all$|^broadcast_confirm_selection$')],
-        states={
-            BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message_handler)],
-            BROADCAST_CONFIRM: [CallbackQueryHandler(broadcast_execute_callback, pattern='^broadcast_execute$'),
-                           CallbackQueryHandler(broadcast_cancel_callback, pattern='^broadcast_cancel$')]
-        },
-        fallbacks=[CommandHandler('cancel', broadcast_cancel_command)],
-        allow_reentry=True
-    )
-
-    settings_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(
-            settings_card_start,
-            pattern=(
-                '^settings_set_card_number$|^settings_set_card_holder$|'
-                '^settings_set_display_name$|^settings_set_monthly_price$'
-            ),
-        )],
-        states={
-            SETTINGS_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_number_input)],
-            SETTINGS_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_holder_input)],
-            SETTINGS_DISPLAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_display_name_input)],
-            SETTINGS_MONTHLY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_monthly_price_input)],
-        },
-        fallbacks=[CommandHandler('cancel', settings_card_cancel)],
-        allow_reentry=True
-    )
-
-    connection_guide_conv = ConversationHandler(
+    workflow_conv = mixed_conversation_handler(
+        # All stateful bot workflows share one conversation.  This prevents an
+        # abandoned editor (for example, display-name settings) from consuming
+        # text intended for a newly started create/edit workflow.
         entry_points=[
+            CommandHandler('createuser', create_user_start),
+            CommandHandler('edituser', edit_user_start),
+            CommandHandler('deleteuser', delete_user_start),
+            CommandHandler('restore', restore_backup_start),
+            CallbackQueryHandler(button_callback, pattern='^broadcast_all$|^broadcast_confirm_selection$'),
+            CallbackQueryHandler(
+                settings_card_start,
+                pattern=(
+                    '^settings_set_card_number$|^settings_set_card_holder$|'
+                    '^settings_set_display_name$|^settings_set_monthly_price$'
+                ),
+            ),
             CallbackQueryHandler(connection_guide_add_start, pattern='^settings_guides_add$'),
             CallbackQueryHandler(
                 connection_guide_edit_start,
@@ -6019,6 +6194,36 @@ async def main():
             ),
         ],
         states={
+            CREATE_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_name)],
+            CREATE_USER_INBOUNDS: [CallbackQueryHandler(create_user_inbound_callback)],
+            CREATE_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_volume), CallbackQueryHandler(create_user_volume)],
+            CREATE_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_expiry), CallbackQueryHandler(create_user_expiry)],
+            CREATE_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_desc), CallbackQueryHandler(create_user_desc)],
+            CREATE_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_group), CallbackQueryHandler(create_user_group)],
+            CREATE_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_remark), CallbackQueryHandler(create_user_remark)],
+            CREATE_USER_LIFECYCLE: [CallbackQueryHandler(create_user_lifecycle)],
+            CREATE_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_reset_days)],
+            EDIT_USER_GET_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_get_id)],
+            EDIT_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_name)],
+            EDIT_USER_INBOUNDS: [CallbackQueryHandler(edit_user_inbound_callback)],
+            EDIT_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_volume), CallbackQueryHandler(edit_user_volume)],
+            EDIT_USER_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_expiry), CallbackQueryHandler(edit_user_expiry)],
+            EDIT_USER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_desc), CallbackQueryHandler(edit_user_desc)],
+            EDIT_USER_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_group), CallbackQueryHandler(edit_user_group)],
+            EDIT_USER_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_remark), CallbackQueryHandler(edit_user_remark)],
+            EDIT_USER_LIFECYCLE: [CallbackQueryHandler(edit_user_lifecycle)],
+            EDIT_USER_RESET_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_user_reset_days)],
+            EDIT_USER_ENABLE: [CallbackQueryHandler(edit_user_enable)],
+            EDIT_USER_REGEN: [CallbackQueryHandler(edit_user_regen)],
+            DELETE_USER_GET_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_user_get_id)],
+            DELETE_USER_CONFIRM: [CallbackQueryHandler(delete_user_confirm)],
+            BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message_handler)],
+            BROADCAST_CONFIRM: [CallbackQueryHandler(broadcast_execute_callback, pattern='^broadcast_execute$'),
+                                CallbackQueryHandler(broadcast_cancel_callback, pattern='^broadcast_cancel$')],
+            SETTINGS_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_number_input)],
+            SETTINGS_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_card_holder_input)],
+            SETTINGS_DISPLAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_display_name_input)],
+            SETTINGS_MONTHLY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, settings_monthly_price_input)],
             CONNECTION_GUIDE_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, connection_guide_title_input)],
             CONNECTION_GUIDE_CONTENT: [
                 CommandHandler('done', connection_guide_done),
@@ -6030,28 +6235,19 @@ async def main():
             ],
             CONNECTION_GUIDE_EDIT_ITEM: [MessageHandler(filters.ALL & ~filters.COMMAND, connection_guide_edit_item_input)],
             CONNECTION_GUIDE_APPEND_ITEM: [MessageHandler(filters.ALL & ~filters.COMMAND, connection_guide_edit_item_input)],
-        },
-        fallbacks=[CommandHandler('cancel', connection_guide_cancel)],
-        allow_reentry=True,
-    )
-
-    restore_conv = ConversationHandler(
-        entry_points=[CommandHandler('restore', restore_backup_start)],
-        states={
             RESTORE_BACKUP_FILE: [MessageHandler(filters.Document.ALL & ~filters.COMMAND, restore_backup_file)],
         },
-        fallbacks=[CommandHandler('cancel', restore_backup_cancel)],
+        fallbacks=[
+            CommandHandler('cancel', workflow_cancel),
+            CallbackQueryHandler(
+                settings_navigation_exit,
+                pattern='^(settings_payments|settings_admin_tools|admin_settings|main_menu)$',
+            ),
+        ],
         allow_reentry=True,
     )
 
-
-    app.add_handler(broadcast_conv)
-    app.add_handler(connection_guide_conv)
-    app.add_handler(settings_conv)
-    app.add_handler(restore_conv)
-    app.add_handler(create_user_conv)
-    app.add_handler(edit_user_conv)
-    app.add_handler(delete_user_conv)
+    app.add_handler(workflow_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("usage", usage))
     app.add_handler(CommandHandler("metrics", metrics_command))

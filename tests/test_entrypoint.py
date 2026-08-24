@@ -159,9 +159,67 @@ def test_client_payloads_match_current_sui_defaults_and_random_util(tmp_path) ->
     })
     script = """
 import base64
+import inspect
+import warnings
 from unittest.mock import patch
 import sui_bot.bot as bot
-from sui_bot.bot import build_client_data_edit, build_client_data_new, build_client_renewal_data
+from telegram.ext import CallbackQueryHandler, MessageHandler, filters
+from sui_bot.bot import (
+    build_client_data_edit, build_client_data_new, build_client_renewal_data,
+    create_optional_field_keyboard, edit_optional_field_keyboard, lifecycle_fields,
+    lifecycle_keyboard, lifecycle_policy_text,
+)
+
+assert lifecycle_fields("regular", 0) == {
+    "delayStart": False, "autoReset": False, "resetDays": 0, "nextReset": 0,
+}
+assert lifecycle_fields("delayed_expiry", 15) == {
+    "delayStart": True, "autoReset": False, "resetDays": 15, "nextReset": 0,
+}
+assert lifecycle_fields("reset_first", 15) == {
+    "delayStart": True, "autoReset": True, "resetDays": 15, "nextReset": 0,
+}
+assert lifecycle_fields("reset_now", 15, now_timestamp=1000) == {
+    "delayStart": False, "autoReset": True, "resetDays": 15,
+    "nextReset": 1000 + 15 * 86400,
+}
+assert "first cycle starts now" in lifecycle_policy_text(False, True, 15).lower()
+assert "after vpn traffic" in lifecycle_policy_text(True, True, 15).lower()
+
+create_callbacks = [row[0].callback_data for row in create_optional_field_keyboard("desc").inline_keyboard]
+assert create_callbacks == ["create_desc_empty", "create_cancel"]
+edit_callbacks = [row[0].callback_data for row in edit_optional_field_keyboard("group").inline_keyboard]
+assert edit_callbacks == ["edit_group_keep", "edit_group_empty", "edit_cancel"]
+assert [row[0].callback_data for row in lifecycle_keyboard("create").inline_keyboard] == [
+    "create_lifecycle_regular", "create_lifecycle_delayed_expiry", "create_lifecycle_reset_now",
+    "create_lifecycle_reset_first", "create_cancel",
+]
+
+# Stateful editors must share one conversation. Otherwise an abandoned settings
+# editor can capture input intended for /createuser or /edituser.
+assert inspect.getsource(bot.main).count("mixed_conversation_handler(") == 1
+
+async def noop(update, context):
+    return 1
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    bot.mixed_conversation_handler(
+        entry_points=[CallbackQueryHandler(noop)],
+        states={1: [MessageHandler(filters.TEXT, noop)]},
+        fallbacks=[],
+    )
+assert not any("per_message=False" in str(item.message) for item in caught)
+
+bot.language_store.set(bot.ADMIN_TELEGRAM_ID, "fa")
+bot.PAYMENT_CURRENCY = "USD"
+payment_text = bot.build_payment_settings_text()
+payment_buttons = [button.text for row in bot.build_payment_settings_keyboard().inline_keyboard for button in row]
+assert "Price per month" not in payment_text
+assert "US dollar" not in payment_text
+assert "دلار آمریکا" in payment_text
+assert not any("Set currency" in text or "Set exact monthly price" in text for text in payment_buttons)
+assert "/cancel" in bot.tr(bot.ADMIN_TELEGRAM_ID, "monthly_price_prompt", currency="USD")
 
 created = build_client_data_new("alice", 0, 0, "Test", "Family", [9, 10])
 assert created["remark"] == ""

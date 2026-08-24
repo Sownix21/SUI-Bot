@@ -3,6 +3,7 @@ import json
 import pytest
 
 from sui_bot.localization import LanguageStore, TRANSLATIONS, translate
+from sui_bot.outgoing_localization import copyable_ltr_code
 
 
 def test_language_store_persists_each_users_choice(tmp_path):
@@ -37,6 +38,16 @@ def test_renewal_templates_are_native_to_each_selected_language():
     assert "Month" not in persian and "ماه" in persian
     assert "Month" not in russian and "мес." in russian
     assert "Month" not in chinese and "个月" in chinese
+    notices = {language: translate(language, "tap_card_to_copy") for language in ("en", "fa", "ru", "zh")}
+    assert all(notice != "tap_card_to_copy" for notice in notices.values())
+    assert len(set(notices.values())) == 4
+
+
+def test_persian_card_number_is_a_standalone_copyable_ltr_entity():
+    card_number = "6219-8619-0513-3194"
+    rendered = translate("fa", "card_number_value", card_number=copyable_ltr_code(card_number))
+    assert rendered.endswith(f"\n\u200e<code>{card_number}</code>\u200e")
+    assert "\u200e" not in card_number
 
 
 def test_broadcast_wrapping_is_localized_without_modifying_admin_text():
@@ -51,6 +62,38 @@ def test_every_catalog_language_has_every_fixed_translation_key():
     assert english_keys
     for language in ("fa", "ru", "zh"):
         assert set(TRANSLATIONS[language]) == english_keys
+
+
+def test_lifecycle_controls_are_translated_in_every_supported_language():
+    for language in ("fa", "ru", "zh"):
+        catalog = TRANSLATIONS[language]
+        assert catalog["lifecycle_standard"] != TRANSLATIONS["en"]["lifecycle_standard"]
+        assert catalog["lifecycle_create_help"] != TRANSLATIONS["en"]["lifecycle_create_help"]
+        assert catalog["lifecycle_edit_help"] != TRANSLATIONS["en"]["lifecycle_edit_help"]
+
+
+def test_payment_admin_and_renewal_request_templates_are_native_and_keep_commands():
+    english_prompt = translate("en", "monthly_price_prompt", currency="USD")
+    for language in ("fa", "ru", "zh"):
+        prompt = translate(language, "monthly_price_prompt", currency="USD")
+        request = translate(
+            language,
+            "renew_admin_request",
+            request_id="abc123",
+            user_id=10,
+            client_id=20,
+            name="alice",
+            description="home",
+            months=3,
+            amount="30 USD",
+        )
+        assert prompt != english_prompt
+        assert "/cancel" in prompt
+        assert "abc123" in request and "alice" in request and "30 USD" in request
+        assert request != translate(
+            "en", "renew_admin_request", request_id="abc123", user_id=10, client_id=20,
+            name="alice", description="home", months=3, amount="30 USD",
+        )
 
 
 def test_last_day_and_expired_messages_are_localized() -> None:

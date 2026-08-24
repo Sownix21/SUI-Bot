@@ -41,6 +41,17 @@ def test_complete_server_status_output_remains_plain_english():
     assert localize_outgoing_text("fa", preserve_dynamic_text(status)) == status
 
 
+def test_bot_commands_are_never_translated_but_surrounding_guidance_is():
+    source = "Cancel: /cancel\nReturn with /start or /restore@SuiBot\nhttps://example.com/cancel"
+    for language in ("fa", "ru", "zh"):
+        localized = localize_outgoing_text(language, source)
+        assert "/cancel" in localized
+        assert "/start" in localized
+        assert "/restore@SuiBot" in localized
+        assert "https://example.com/cancel" in localized
+        assert "/لغو" not in localized
+
+
 def test_owner_brand_replaces_fixed_brand_but_not_server_values():
     source = f"Welcome to SUI Bot\nServer: {preserve_dynamic_text('SUI Bot')}"
     assert localize_outgoing_text("en", source, display_name="Owner VPN") == (
@@ -53,4 +64,6 @@ def test_ltr_isolate_keeps_card_number_copy_value_unchanged():
     isolated = ltr_isolate("1234-5678-9012-3456")
     assert isolated == "\u20661234-5678-9012-3456\u2069"
     assert isolated.strip("\u2066\u2069") == "1234-5678-9012-3456"
-    assert copyable_ltr_code("1234-5678") == "\u2066<code>1234-5678</code>\u2069"
+    copyable = copyable_ltr_code("1234-5678")
+    assert copyable == "\u200e<code>1234-5678</code>\u200e"
+    assert copyable.removeprefix("\u200e<code>").removesuffix("</code>\u200e") == "1234-5678"
