@@ -111,6 +111,91 @@ assert "continuing button action" in warning.call_args.args[0]
     assert result.returncode == 0, result.stderr
 
 
+def test_renewal_receipt_retries_delivery_and_keeps_state_on_failure(tmp_path) -> None:
+    environment = os.environ.copy()
+    environment.update({
+        "SUI_HOST": "https://panel.example.com",
+        "SUI_TOKEN": "secret",
+        "BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz_ABCD",
+        "ADMIN_TELEGRAM_ID": "123456",
+        "DATA_DIR": str(tmp_path),
+        "BOT_LOG_FILE": "",
+    })
+    script = """
+import asyncio
+from unittest.mock import AsyncMock, patch
+from telegram.error import TimedOut
+import sui_bot.bot as bot
+
+class Value: pass
+class Context: pass
+
+bot.telegram_clients.clear()
+bot.telegram_clients[10] = [7]
+bot.renewal_month_options = [1, 2, 3]
+bot.pending_renew_requests.clear()
+
+def make_update_and_context(sender):
+    photo = Value()
+    photo.file_id = "receipt-file-id"
+    message = Value()
+    message.photo = [photo]
+    message.document = None
+    message.reply_text = AsyncMock()
+    update = Value()
+    update.effective_user = Value()
+    update.effective_user.id = 10
+    update.message = message
+    context = Context()
+    context.user_data = {
+        "pending_renew_submission": {"client_id": 7, "months": 1, "amount": 1000}
+    }
+    context.bot = Value()
+    context.bot.send_photo = sender
+    context.bot.send_document = AsyncMock()
+    return update, context
+
+client_response = {"success": True, "obj": {"clients": [{"id": 7, "name": "alice", "desc": "home"}]}}
+
+async def run_success():
+    sender = AsyncMock(side_effect=[TimedOut("temporary"), None])
+    update, context = make_update_and_context(sender)
+    with patch.object(bot.api_client, "get", new=AsyncMock(return_value=client_response)), patch(
+        "sui_bot.bot.asyncio.sleep", new=AsyncMock()
+    ):
+        await bot.renew_receipt_handler(update, context)
+    assert sender.await_count == 2
+    assert sender.await_args.kwargs["chat_id"] == 123456
+    assert "pending_renew_submission" not in context.user_data
+    assert len(bot.pending_renew_requests) == 1
+    assert update.message.reply_text.await_args.args[0] == bot.tr(10, "receipt_sent")
+
+async def run_failure():
+    bot.pending_renew_requests.clear()
+    sender = AsyncMock(side_effect=TimedOut("still unavailable"))
+    update, context = make_update_and_context(sender)
+    with patch.object(bot.api_client, "get", new=AsyncMock(return_value=client_response)), patch(
+        "sui_bot.bot.asyncio.sleep", new=AsyncMock()
+    ):
+        await bot.renew_receipt_handler(update, context)
+    assert sender.await_count == 3
+    assert "pending_renew_submission" in context.user_data
+    assert not bot.pending_renew_requests
+    assert update.message.reply_text.await_args.args[0] == bot.tr(10, "renew_submit_failed")
+
+asyncio.run(run_success())
+asyncio.run(run_failure())
+"""
+    result = subprocess.run(  # noqa: S603 - current test interpreter and fixed test program
+        [sys.executable, "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_expired_user_receives_localized_message_and_renew_action(tmp_path) -> None:
     environment = os.environ.copy()
     environment.update({

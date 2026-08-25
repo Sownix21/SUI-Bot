@@ -475,8 +475,9 @@ def user_language(user_id: int) -> str:
     return language_store.get(user_id) or "en"
 
 
-def tr(user_id: int, key: str, **values: Any) -> str:
-    return translate(user_language(user_id), key, **values)
+def tr(recipient_id: int, key: str, **values: Any) -> str:
+    """Translate for a recipient without reserving template field names."""
+    return translate(user_language(recipient_id), key, **values)
 
 async def localized_query_answer(query, text=None, *args, **kwargs):
     localized = localize_outgoing_text(
@@ -5152,16 +5153,57 @@ async def broadcast_cancel_command(update: Update, context: ContextTypes.DEFAULT
     context.user_data.clear()
     return ConversationHandler.END
 
+
+async def forward_renewal_receipt(
+    bot: ExtBot,
+    *,
+    media_type: str,
+    media_file_id: str,
+    caption: str,
+    keyboard: InlineKeyboardMarkup,
+) -> None:
+    """Forward a receipt, retrying only temporary Telegram transport failures."""
+    for attempt in range(1, 4):
+        try:
+            if media_type == "photo":
+                await bot.send_photo(
+                    chat_id=ADMIN_TELEGRAM_ID,
+                    photo=media_file_id,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+            else:
+                await bot.send_document(
+                    chat_id=ADMIN_TELEGRAM_ID,
+                    document=media_file_id,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+            return
+        except NetworkError as exc:
+            if attempt == 3:
+                raise
+            logger.warning(
+                "Telegram interrupted renewal receipt delivery (attempt %s/3: %s); retrying",
+                attempt,
+                exc,
+            )
+            await asyncio.sleep(0.5 * attempt)
+
+
 async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cleanup_pending_renew_requests()
     user_id = update.effective_user.id
     pending = context.user_data.get('pending_renew_submission')
-    if not pending:
+    if not isinstance(pending, dict):
         return
 
-    client_id = int(pending.get("client_id", 0))
-    months = int(pending.get("months", 0))
-    amount = int(pending.get("amount", 0))
+    try:
+        client_id = int(pending.get("client_id", 0))
+        months = int(pending.get("months", 0))
+        amount = int(pending.get("amount", 0))
+    except (TypeError, ValueError):
+        client_id = months = amount = 0
     if not client_id or months not in set(get_renewal_month_options()) or amount <= 0:
         context.user_data.pop('pending_renew_submission', None)
         await update.message.reply_text(tr(user_id, "renew_invalid_state"))
@@ -5185,7 +5227,7 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     request_id = secrets.token_hex(4)
-    pending_renew_requests[request_id] = {
+    request_record = {
         "request_id": request_id,
         "user_tg_id": user_id,
         "client_id": client_id,
@@ -5195,7 +5237,6 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "media_file_id": media_file_id,
         "created_at": datetime.now(timezone.utc).timestamp()
     }
-    context.user_data.pop('pending_renew_submission', None)
 
     client_desc = "Unknown"
     client_name = "Unknown"
@@ -5210,43 +5251,42 @@ async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Failed to fetch client details for renewal request: {e}")
 
-    caption = tr(
-        ADMIN_TELEGRAM_ID,
-        "renew_admin_request",
-        request_id=preserve_dynamic_text(request_id),
-        user_id=user_id,
-        client_id=client_id,
-        name=client_name,
-        description=client_desc,
-        months=months,
-        amount=preserve_dynamic_text(format_money(amount)),
-    )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "approve"), callback_data=f"renew_appr_{request_id}")],
-        [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "reject"), callback_data=f"renew_rej_{request_id}")]
-    ])
-
     try:
-        if media_type == "photo":
-            await context.bot.send_photo(
-                chat_id=ADMIN_TELEGRAM_ID,
-                photo=media_file_id,
-                caption=caption,
-                reply_markup=keyboard
-            )
-        else:
-            await context.bot.send_document(
-                chat_id=ADMIN_TELEGRAM_ID,
-                document=media_file_id,
-                caption=caption,
-                reply_markup=keyboard
-            )
-    except Exception as e:
+        caption = tr(
+            ADMIN_TELEGRAM_ID,
+            "renew_admin_request",
+            request_id=preserve_dynamic_text(request_id),
+            user_id=user_id,
+            client_id=client_id,
+            name=client_name,
+            description=client_desc,
+            months=months,
+            amount=preserve_dynamic_text(format_money(amount)),
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "approve"), callback_data=f"renew_appr_{request_id}")],
+            [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "reject"), callback_data=f"renew_rej_{request_id}")]
+        ])
+        pending_renew_requests[request_id] = request_record
+        await forward_renewal_receipt(
+            context.bot,
+            media_type=media_type,
+            media_file_id=media_file_id,
+            caption=caption,
+            keyboard=keyboard,
+        )
+    except TelegramError as e:
         pending_renew_requests.pop(request_id, None)
-        logger.error(f"Failed to forward renewal receipt to admin: {e}")
+        logger.warning("Failed to forward renewal receipt to admin (%s)", e)
+        await update.message.reply_text(tr(user_id, "renew_submit_failed"))
+        return
+    except Exception:
+        pending_renew_requests.pop(request_id, None)
+        logger.exception("Failed to prepare or forward renewal receipt to admin")
         await update.message.reply_text(tr(user_id, "renew_submit_failed"))
         return
 
+    context.user_data.pop('pending_renew_submission', None)
     await update.message.reply_text(tr(user_id, "receipt_sent"))
 
 @rate_limited(admin_only=True)
@@ -5769,12 +5809,15 @@ async def send_cleanup_notification(app, unlinked_details, total_count):
         logger.error(f"Failed to send cleanup notification: {e}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if isinstance(context.error, NetworkError):
+    network_error = isinstance(context.error, NetworkError)
+    if network_error:
         logger.warning("Telegram operation was interrupted (%s)", context.error)
     else:
         logger.error("Unhandled bot error: %s", context.error, exc_info=context.error)
     if update and update.effective_user:
         metrics.record_error(update.effective_user.id)
+    if network_error:
+        return
     if update and update.effective_message:
         try:
             await update.effective_message.reply_text("❌ Unexpected Error , Please Contact Admin")
