@@ -51,7 +51,7 @@ EDITABLE_FIELDS = [
     ("SUI_TOKEN", "S-UI token"),
     ("BOT_TOKEN", "Telegram bot token"),
     ("ADMIN_TELEGRAM_ID", "Admin Telegram ID"),
-    ("ADMIN_CLIENT_ID", "Admin client ID"),
+    ("ADMIN_CLIENT_ID", "Optional admin client ID (0 = unassigned)"),
     ("ALLOW_INSECURE_HTTP", "Allow insecure HTTP"),
     ("REDIS_ENABLED", "Enable Redis rate limiting"),
     ("REDIS_HOST", "Redis host"),
@@ -174,7 +174,7 @@ def validate_environment(values: dict[str, str]) -> list[str]:
         except ValueError:
             errors.append(f"{boolean_key} must be true or false")
     positive_keys = (
-        "ADMIN_CLIENT_ID", "BACKUP_MAX_BYTES", "RATE_LIMIT_WINDOW", "MAX_REQUESTS_PER_WINDOW",
+        "BACKUP_MAX_BYTES", "RATE_LIMIT_WINDOW", "MAX_REQUESTS_PER_WINDOW",
         "BLOCK_DURATION", "ITEMS_PER_PAGE", "SUB_CACHE_DURATION", "REMINDER_COOLDOWN",
         "RENEWAL_MONTHLY_PRICE",
     )
@@ -185,7 +185,7 @@ def validate_environment(values: dict[str, str]) -> list[str]:
                     raise ValueError
             except ValueError:
                 errors.append(f"{key} must be a positive integer")
-    for key in ("REDIS_DB", "RATE_LIMIT_SECONDS"):
+    for key in ("ADMIN_CLIENT_ID", "REDIS_DB", "RATE_LIMIT_SECONDS"):
         if values.get(key):
             try:
                 if int(values[key]) < 0:

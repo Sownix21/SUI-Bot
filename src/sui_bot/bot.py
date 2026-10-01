@@ -33,7 +33,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, ExtBot, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, ExtBot, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.helpers import escape_markdown
 from telegram.request import HTTPXRequest
@@ -57,6 +57,7 @@ from .reporting import (
 from .runtime_settings import load_runtime_settings, save_runtime_setting
 from .sales import SalesStore
 from .sales_ui import SALES_INPUT, SalesUI
+from .membership import MEMBERSHIP_INPUT, MembershipStore, MembershipUI
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
 from .navigation import has_multiple_subscriptions
@@ -162,6 +163,12 @@ try:
 except (OSError, ValueError) as exc:
     raise RuntimeError("Cannot load sales.json; check permissions or restore a valid bot backup") from exc
 sales_ui = SalesUI(sys.modules[__name__], sales_store)
+MEMBERSHIP_FILE = managed_data_path("required_membership.json")
+try:
+    membership_store = MembershipStore(MEMBERSHIP_FILE)
+except (OSError, ValueError) as exc:
+    raise RuntimeError("Cannot load required_membership.json; check permissions or restore a valid bot backup") from exc
+membership_ui = MembershipUI(sys.modules[__name__], membership_store)
 
 # Inbounds cache constants
 INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
@@ -1005,10 +1012,10 @@ def load_assignments():
                 )
         except Exception as e:
             logger.error("Failed to load assignments from %s: %s", ASSIGNMENTS_FILE, e)
-            telegram_clients = {ADMIN_TELEGRAM_ID: [ADMIN_CLIENT_ID]}
+            telegram_clients = {}
     else:
-        logger.warning("Assignments file not found at %s; using admin default", ASSIGNMENTS_FILE)
-        telegram_clients = {ADMIN_TELEGRAM_ID: [ADMIN_CLIENT_ID]}
+        telegram_clients = {ADMIN_TELEGRAM_ID: [ADMIN_CLIENT_ID]} if ADMIN_CLIENT_ID > 0 else {}
+        logger.info("No assignments file; loaded %s explicitly configured assignment(s)", len(telegram_clients))
 
 def save_assignments():
     # Ensure all values are lists before saving
@@ -1480,6 +1487,7 @@ def build_payment_settings_keyboard():
 
 def build_admin_tools_settings_keyboard():
     return InlineKeyboardMarkup([
+        [membership_ui.button(ADMIN_TELEGRAM_ID, "title", "membership_admin")],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
         [InlineKeyboardButton("🕐 Set Administrative Timezone", callback_data='settings_timezone')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "connection_guides_title"), callback_data='settings_connection_guides')],
@@ -1578,6 +1586,7 @@ def bot_state_paths() -> dict[str, str]:
         "expired_notifications": EXPIRED_NOTIFICATIONS_FILE,
         "connection_guides": CONNECTION_GUIDES_FILE,
         "sales": SALES_FILE,
+        "required_membership": MEMBERSHIP_FILE,
     }
 
 def backup_configuration_summary() -> dict[str, Any]:
@@ -1628,6 +1637,8 @@ def reload_restored_state() -> None:
     metrics.load_metrics()
     connection_guide_store.load()
     sales_store.load()
+    membership_store.load()
+    membership_ui.attempts.clear()
     load_cached_sub_uri()
     inbounds_cache = load_cached_inbounds()
     restored_settings = load_runtime_settings(RUNTIME_SETTINGS_FILE)
@@ -2872,6 +2883,16 @@ async def sales_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @rate_limited(admin_only=True)
 async def sales_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await sales_ui.text(update, context)
+
+
+@rate_limited(admin_only=True)
+async def membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await membership_ui.callback(update, context)
+
+
+@rate_limited(admin_only=True)
+async def membership_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await membership_ui.text(update, context)
 
 
 def mixed_conversation_handler(**kwargs) -> ConversationHandler:
@@ -6249,6 +6270,7 @@ async def main():
         # abandoned editor (for example, display-name settings) from consuming
         # text intended for a newly started create/edit workflow.
         entry_points=[
+            CallbackQueryHandler(membership_callback, pattern='^membership_(admin|add|toggle|remove_-?[0-9]+)$'),
             CommandHandler('start', start),
             CallbackQueryHandler(sales_callback, pattern='^sales_'),
             CommandHandler('createuser', create_user_start),
@@ -6270,6 +6292,7 @@ async def main():
             ),
         ],
         states={
+            MEMBERSHIP_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, membership_input)],
             SALES_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sales_text)],
             CREATE_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_name)],
             CREATE_USER_INBOUNDS: [CallbackQueryHandler(create_user_inbound_callback)],
@@ -6324,6 +6347,7 @@ async def main():
         allow_reentry=True,
     )
 
+    app.add_handler(TypeHandler(Update, membership_ui.guard), group=-1)
     app.add_handler(workflow_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("usage", usage))

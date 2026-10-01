@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .connection_guides import validate_guide_data
 from .sales import validate_sales
+from .membership import validate_membership
 
 BUNDLE_FORMAT = "sui-bot-backup"
 BUNDLE_VERSION = 1
@@ -27,6 +28,7 @@ STATE_KEYS = frozenset({
     "expired_notifications",
     "connection_guides",
     "sales",
+    "required_membership",
 })
 RUNTIME_SETTING_KEYS = frozenset({
     "RENEWAL_MONTHLY_PRICE",
@@ -99,6 +101,8 @@ def _validate_state_entry(key: str, value: Any) -> None:
         validate_guide_data(value)
     elif key == "sales":
         validate_sales(value)
+    elif key == "required_membership":
+        validate_membership(value)
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):
         raise ValueError(f"{key} must be a JSON object")
 

@@ -9,6 +9,7 @@ A Telegram bot for managing S-UI users, subscriptions, renewals, and subscriptio
 - **Subscription management:** usage, expiry, subscription links, and multiple subscriptions per Telegram account.
 - **Admin tools:** create, edit, delete, and assign clients; view online users, server status, and activity reports. Interactive assignment is available alongside `/assign`.
 - **Public sales:** optional storefront with admin-defined plans, prices, durations, quotas, and inbound presets. Every receipt requires admin approval; accounts can then be configured manually or created automatically and assigned to the buyer.
+- **Required membership:** optionally require users to join your channels or groups before using the bot, without interrupting outgoing reminders or broadcasts.
 - **Renewals & reminders:** receipt-based renewal approval, expiry alerts with renewal buttons, and an expired-subscription notification.
 - **Four languages:** English, Persian, Russian, and Chinese, selected independently by each user. Commands and server-provided content remain unchanged.
 - **Personalization:** message display name, payment details, currency, administrative timezone, and editable connection guides with text, videos, images, and files. The display name does not change the bot's BotFather name or username.
@@ -38,6 +39,18 @@ Use the **full panel base URL**, for example `https://panel.example.com:2053/pri
 **No subscription URI is required during installation.** The bot reads it from the panel. If the panel's custom subscription URI is empty, the panel's default subscription address is used. Configure custom domains or ports in S-UI; the bot does not remove or rewrite the subscription port.
 
 Open the bot in Telegram, send `/start`, and select your language. The configured administrator will see the management options.
+
+Admin access and VPN subscriptions are separate. A fresh installation does **not** assume any panel client belongs to the admin. To show your own subscription, explicitly assign it using the assignment menu or `/assign <your Telegram ID> <client ID>`. Updates preserve existing assignments; review and unlink any incorrect assignment from an older installation.
+
+## 📢 Required channels & groups
+
+Open **Settings → Administration → Required channels/groups**. This feature is off by default.
+
+1. Make the bot an administrator in each required channel or group.
+2. Add its public `@username` or negative numeric chat ID. For a private chat, supply an existing invitation link and check that it opens the correct chat. Up to eight chats can be required; adding the same chat again updates its details.
+3. Enable the requirement. New and existing users must join **all** listed chats, then press **I joined**. A pending join request is not membership yet.
+
+Until verified, users cannot view subscriptions, buy, renew, or submit receipts. They can still choose their language and receive broadcasts and reminders. The administrator is exempt. Membership is checked again on subsequent interactions; if Telegram cannot verify it, access stays blocked until verification succeeds. Users should resend any command or receipt they submitted while blocked.
 
 ## 🛒 Set up public sales
 
@@ -103,7 +116,7 @@ Updates preserve the managed configuration and bot data; **you do not need to mo
 
 In Telegram, use **Settings → Administration → Backup & Restore** to receive a bot backup. To restore it, send `/restore` and upload that file as the administrator.
 
-Bot backups include assignments, settings, languages, guides, metrics, and sales plans/orders. **They do not replace the separate S-UI database backup**, and exclude the live bot and panel API tokens. Keep them private: they still contain customer and payment information. Restore matching bot/panel backups carefully; an older order ledger may not reflect accounts created afterwards.
+Bot backups include assignments, settings, languages, guides, metrics, sales plans/orders, and required-membership settings. **They do not replace the separate S-UI database backup**, and exclude the live bot and panel API tokens. Keep them private: they still contain customer and payment information and private invitation links. Restore matching bot/panel backups carefully; an older order ledger may not reflect accounts created afterwards.
 
 Guide media and receipts use Telegram file references; restore them with the same Telegram bot.
 

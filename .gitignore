@@ -39,6 +39,7 @@ connection_guides.json
 sales.json
 renew_requests.json
 user_languages.json
+required_membership.json
 *.db
 *.sqlite
 *.sqlite3

@@ -118,7 +118,7 @@ class Settings:
             sui_token=str(env("SUI_TOKEN", required=True)),
             bot_token=str(env("BOT_TOKEN", required=True)),
             admin_telegram_id=env("ADMIN_TELEGRAM_ID", required=True, cast=int),
-            admin_client_id=env("ADMIN_CLIENT_ID", 1, cast=int),
+            admin_client_id=env("ADMIN_CLIENT_ID", 0, cast=int),
             backup_dir=str(env("BACKUP_DIR", "backups")),
             db_name=str(env("DB_NAME", "Sui")),
             backup_max_bytes=env("BACKUP_MAX_BYTES", 50 * 1024 * 1024, cast=int),
@@ -151,7 +151,6 @@ class Settings:
     def validate(self) -> None:
         positive = {
             "ADMIN_TELEGRAM_ID": self.admin_telegram_id,
-            "ADMIN_CLIENT_ID": self.admin_client_id,
             "BACKUP_MAX_BYTES": self.backup_max_bytes,
             "RATE_LIMIT_WINDOW": self.rate_limit_window,
             "MAX_REQUESTS_PER_WINDOW": self.max_requests_per_window,
@@ -164,6 +163,8 @@ class Settings:
         for name, value in positive.items():
             if value <= 0:
                 raise RuntimeError(f"{name} must be a positive integer")
+        if self.admin_client_id < 0:
+            raise RuntimeError("ADMIN_CLIENT_ID must be 0 (unassigned) or a positive client ID")
         if self.rate_limit_seconds < 0:
             raise RuntimeError("RATE_LIMIT_SECONDS must be a non-negative integer")
         if not 1 <= self.redis_port <= 65535:
