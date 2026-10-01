@@ -12,6 +12,7 @@ import string
 import uuid
 import html
 import warnings
+import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from functools import wraps
@@ -54,6 +55,8 @@ from .reporting import (
     save_expired_notification_ids,
 )
 from .runtime_settings import load_runtime_settings, save_runtime_setting
+from .sales import SalesStore
+from .sales_ui import SALES_INPUT, SalesUI
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
 from .navigation import has_multiple_subscriptions
@@ -69,7 +72,7 @@ from .sui_metadata import (
     build_web_panel_url,
     extract_load_metadata,
     extract_partial_metadata,
-    replace_url_origin,
+
 )
 
 try:
@@ -147,15 +150,18 @@ WEB_PANEL_BASE_URL = SETTINGS.web_panel_base_url
 WEB_PANEL_ENABLED = str(RUNTIME_SETTINGS.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
     "1", "true", "yes", "on"
 }
-SUBSCRIPTION_PUBLIC_ORIGIN = SETTINGS.subscription_public_origin
-HIDE_SUBSCRIPTION_PORT = str(
-    RUNTIME_SETTINGS.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
-).strip().lower() in {"1", "true", "yes", "on"}
+
 LANGUAGE_STORE_FILE = managed_data_path("user_languages.json")
 language_store = LanguageStore(LANGUAGE_STORE_FILE)
 EXPIRED_NOTIFICATIONS_FILE = managed_data_path("expired_notifications.json")
 CONNECTION_GUIDES_FILE = managed_data_path("connection_guides.json")
 connection_guide_store = ConnectionGuideStore(CONNECTION_GUIDES_FILE)
+SALES_FILE = managed_data_path("sales.json")
+try:
+    sales_store = SalesStore(SALES_FILE)
+except (OSError, ValueError) as exc:
+    raise RuntimeError("Cannot load sales.json; check permissions or restore a valid bot backup") from exc
+sales_ui = SalesUI(sys.modules[__name__], sales_store)
 
 # Inbounds cache constants
 INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
@@ -602,6 +608,9 @@ def sui_clients(response: object) -> list[dict] | None:
     clients = obj.get("clients") if obj is not None else None
     if not isinstance(clients, list) or any(not isinstance(client, dict) for client in clients):
         return None
+    ids = [client.get("id") for client in clients]
+    if any(type(client_id) is not int or client_id <= 0 for client_id in ids) or len(set(ids)) != len(ids):
+        return None
     return clients
 
 
@@ -621,9 +630,11 @@ class APIClient:
         content_length = response.content_length
         if content_length is not None and content_length > MAX_API_RESPONSE_BYTES:
             raise ValueError("S-UI response exceeds the configured safety limit")
-        payload = await response.content.read(MAX_API_RESPONSE_BYTES + 1)
-        if len(payload) > MAX_API_RESPONSE_BYTES:
-            raise ValueError("S-UI response exceeds the configured safety limit")
+        payload = bytearray()
+        async for chunk in response.content.iter_chunked(65536):
+            payload.extend(chunk)
+            if len(payload) > MAX_API_RESPONSE_BYTES:
+                raise ValueError("S-UI response exceeds the configured safety limit")
         decoded = json.loads(payload)
         if not isinstance(decoded, dict):
             raise ValueError("S-UI response must be a JSON object")
@@ -643,6 +654,7 @@ class APIClient:
                 async with self.session.get(
                     url,
                     params=params,
+                    allow_redirects=False,
                     headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
                 ) as response:
                     response.raise_for_status()
@@ -682,7 +694,7 @@ async def create_or_edit_client(action: str, client_data: dict) -> dict:
     url = f"{api_client.base_url}/apiv2/save"
     try:
         data_payload = {"object": "clients", "action": action, "data": json.dumps(client_data)}
-        async with api_client.session.post(url, data=data_payload) as response:
+        async with api_client.session.post(url, data=data_payload, allow_redirects=False) as response:
             response.raise_for_status()
             return await api_client.decode_json_response(response)
     except Exception as e:
@@ -740,6 +752,8 @@ def shuffle_configs(configs: dict, key: Optional[str] = None):
             configs[k]["password"] = random_shadowsocks_password(32)
         elif k == "hysteria":
             configs[k]["auth_str"] = random_seq(10)
+        elif k == "snell":
+            configs[k]["userkey"] = random_seq(32)
         elif k == "tuic":
             configs[k]["password"] = random_seq(10)
             configs[k]["uuid"] = random_uuid()
@@ -764,6 +778,7 @@ def random_configs(user: str) -> dict:
         "trojan": {"name": user, "password": mixed_password},
         "naive": {"username": user, "password": mixed_password},
         "hysteria": {"name": user, "auth_str": mixed_password},
+        "snell": {"name": user, "userkey": random_alnum(32)},
         "tuic": {"name": user, "uuid": uid, "password": mixed_password},
         "hysteria2": {"name": user, "password": mixed_password},
     }
@@ -865,7 +880,7 @@ def build_client_data_edit(
             edited[field] = original_client.get(field, default)
     if regenerate_secrets:
         if original_client and isinstance(original_client.get("config"), dict):
-            cfg = json.loads(json.dumps(original_client.get("config", {})))
+            cfg = {**build_config_for_name(name), **json.loads(json.dumps(original_client.get("config", {})))}
             update_configs(cfg, name)
             shuffle_configs(cfg)
             edited["config"] = cfg
@@ -874,7 +889,7 @@ def build_client_data_edit(
     elif original_client:
         cfg = original_client.get("config", {})
         if isinstance(cfg, dict):
-            cfg = json.loads(json.dumps(cfg))
+            cfg = {**build_config_for_name(name), **json.loads(json.dumps(cfg))}
             update_configs(cfg, name)
         edited["config"] = cfg
     else:
@@ -889,11 +904,13 @@ def build_client_data_edit(
         edited["resetDays"] = max(0, reset_days)
     if next_reset is not None:
         edited["nextReset"] = max(0, next_reset)
+    if edited["delayStart"] and not edited["autoReset"]:
+        edited["expiry"] = 0
     return edited
 
 
 def build_client_renewal_data(original_client: dict, client_id: int, new_expiry: int) -> dict:
-    """Build a renewal edit while resetting current and accumulated traffic."""
+    """Reset current usage; the panel retains accumulated lifetime traffic."""
     renewed = json.loads(json.dumps(original_client))
     renewed.update({
         "id": client_id,
@@ -901,8 +918,9 @@ def build_client_renewal_data(original_client: dict, client_id: int, new_expiry:
         "enable": True,
         "up": 0,
         "down": 0,
-        "totalUp": 0,
-        "totalDown": 0,
+        "totalUp": original_client.get("totalUp", 0) + original_client.get("up", 0),
+        "totalDown": original_client.get("totalDown", 0) + original_client.get("down", 0),
+        "delayStart": False,
     })
     return renewed
 
@@ -1419,10 +1437,7 @@ def build_payment_settings_text() -> str:
 
 def build_admin_tools_settings_text() -> str:
     display_name = preserve_dynamic_text(BOT_DISPLAY_NAME)
-    port_status = tr(
-        ADMIN_TELEGRAM_ID,
-        "subscription_port_hidden" if HIDE_SUBSCRIPTION_PORT else "subscription_port_kept",
-    )
+
     web_panel_status_key = (
         "web_panel_enabled"
         if WEB_PANEL_ENABLED and WEB_PANEL_BASE_URL
@@ -1434,13 +1449,14 @@ def build_admin_tools_settings_text() -> str:
         f"{tr(ADMIN_TELEGRAM_ID, 'administration')}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'display_name_label')}: {display_name}\n"
         f"🕐 Administrative Timezone: {ADMIN_TIMEZONES[ADMIN_TIMEZONE][1]}\n"
-        f"{tr(ADMIN_TELEGRAM_ID, 'subscription_link_mode')}: {port_status}\n\n"
+
         f"{tr(ADMIN_TELEGRAM_ID, 'web_panel_setting')}: {tr(ADMIN_TELEGRAM_ID, web_panel_status_key)}\n\n"
         f"{tr(ADMIN_TELEGRAM_ID, 'guide_admin_count')}: {len(connection_guide_store.list_guides())}"
     )
 
 def build_settings_menu_keyboard():
     return InlineKeyboardMarkup([
+        [sales_ui.button(ADMIN_TELEGRAM_ID, "admin", "sales_admin")],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "payments_and_renewal"), callback_data='settings_payments')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "administration"), callback_data='settings_admin_tools')],
         [InlineKeyboardButton("🏠 Main Menu", callback_data='main_menu')],
@@ -1467,13 +1483,7 @@ def build_admin_tools_settings_keyboard():
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
         [InlineKeyboardButton("🕐 Set Administrative Timezone", callback_data='settings_timezone')],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "connection_guides_title"), callback_data='settings_connection_guides')],
-        [InlineKeyboardButton(
-            tr(
-                ADMIN_TELEGRAM_ID,
-                "keep_subscription_port" if HIDE_SUBSCRIPTION_PORT else "remove_subscription_port",
-            ),
-            callback_data='settings_subscription_port',
-        )],
+
         [InlineKeyboardButton(
             tr(ADMIN_TELEGRAM_ID, "disable_web_panel" if WEB_PANEL_ENABLED else "enable_web_panel"),
             callback_data='settings_web_panel',
@@ -1567,6 +1577,7 @@ def bot_state_paths() -> dict[str, str]:
         "inbounds_cache": INBOUNDS_CACHE_FILE,
         "expired_notifications": EXPIRED_NOTIFICATIONS_FILE,
         "connection_guides": CONNECTION_GUIDES_FILE,
+        "sales": SALES_FILE,
     }
 
 def backup_configuration_summary() -> dict[str, Any]:
@@ -1609,13 +1620,14 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
-    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED
+    global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, WEB_PANEL_ENABLED
     global ADMIN_TIMEZONE, PAYMENT_CURRENCY
     global renewal_month_options
     load_assignments()
     language_store.load()
     metrics.load_metrics()
     connection_guide_store.load()
+    sales_store.load()
     load_cached_sub_uri()
     inbounds_cache = load_cached_inbounds()
     restored_settings = load_runtime_settings(RUNTIME_SETTINGS_FILE)
@@ -1626,9 +1638,7 @@ def reload_restored_state() -> None:
     PAYMENT_CARD_NUMBER = str(restored_settings.get("PAYMENT_CARD_NUMBER", SETTINGS.payment_card_number))
     PAYMENT_CARD_HOLDER = str(restored_settings.get("PAYMENT_CARD_HOLDER", SETTINGS.payment_card_holder))
     BOT_DISPLAY_NAME = validate_display_name(restored_settings.get("BOT_DISPLAY_NAME", SETTINGS.bot_display_name))
-    HIDE_SUBSCRIPTION_PORT = str(
-        restored_settings.get("HIDE_SUBSCRIPTION_PORT", SETTINGS.hide_subscription_port)
-    ).strip().lower() in {"1", "true", "yes", "on"}
+
     WEB_PANEL_ENABLED = str(restored_settings.get("WEB_PANEL_ENABLED", "false")).strip().lower() in {
         "1", "true", "yes", "on"
     }
@@ -2045,6 +2055,8 @@ def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
     subscription_key = "my_subscriptions" if has_multiple_subscriptions(telegram_clients, uid) else "my_subscription"
     keyboard = [[InlineKeyboardButton(tr(uid, subscription_key), callback_data='my_usage')]]
+    if sales_store.data["enabled"] or sales_store.open_order(uid):
+        keyboard.append([sales_ui.button(uid, "shop", "sales_shop")])
     if is_admin:
         keyboard.extend([
             [InlineKeyboardButton(tr(uid, "all_users"), callback_data='all_clients_page_1'), InlineKeyboardButton(tr(uid, "online_users"), callback_data='online_users')],
@@ -2117,14 +2129,16 @@ def get_pagination_keyboard(current_page: int, total_pages: int, prefix: str):
 
 @rate_limited(admin_only=False)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     user_id = update.effective_user.id
     if language_store.get(user_id) is None:
         await update.message.reply_text(translate("en", "choose_language"), reply_markup=language_keyboard())
-        return
+        return ConversationHandler.END
     is_admin = (user_id == ADMIN_TELEGRAM_ID)
     welcome_msg = tr(user_id, "welcome")
     keyboard = get_main_menu_keyboard(is_admin, user_id)
     await update.message.reply_text(welcome_msg, reply_markup=keyboard)
+    return ConversationHandler.END
 
 @rate_limited(admin_only=False)
 async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2850,6 +2864,16 @@ async def workflow_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+@rate_limited(admin_only=False)
+async def sales_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await sales_ui.callback(update, context)
+
+
+@rate_limited(admin_only=True)
+async def sales_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await sales_ui.text(update, context)
+
+
 def mixed_conversation_handler(**kwargs) -> ConversationHandler:
     """Build a mixed message/callback workflow without PTB's generic advisory."""
     # This workflow intentionally keys state by chat and user, because it accepts
@@ -2868,7 +2892,7 @@ async def delete_client(client_id: int) -> dict:
     url = f"{api_client.base_url}/apiv2/save"
     try:
         data_payload = {"object": "clients", "action": "del", "data": str(client_id)}
-        async with api_client.session.post(url, data=data_payload) as response:
+        async with api_client.session.post(url, data=data_payload, allow_redirects=False) as response:
             response.raise_for_status()
             return await api_client.decode_json_response(response)
     except Exception as e:
@@ -3309,6 +3333,13 @@ async def edit_user_lifecycle(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await prompt_edit_enable(query, context)
     if policy not in {'delayed_expiry', 'reset_now', 'reset_first'}:
         return EDIT_USER_LIFECYCLE
+    original = context.user_data['original_client_data']
+    if policy in {'delayed_expiry', 'reset_first'} and original.get('up', 0) + original.get('down', 0) > 0:
+        await query.edit_message_text(
+            tr(query.from_user.id, "delay_start_used"),
+            reply_markup=lifecycle_keyboard('edit', include_keep=True, user_id=query.from_user.id),
+        )
+        return EDIT_USER_LIFECYCLE
     context.user_data['edited_client_policy'] = policy
     prompt_key = "lifecycle_delayed_prompt" if policy == 'delayed_expiry' else "lifecycle_reset_prompt"
     prompt = tr(query.from_user.id, prompt_key)
@@ -3326,6 +3357,11 @@ async def edit_user_reset_days(update: Update, context: ContextTypes.DEFAULT_TYP
         return EDIT_USER_RESET_DAYS
     policy = context.user_data['edited_client_policy']
     fields = lifecycle_fields(policy, days)
+    original = context.user_data['original_client_data']
+    if policy == 'reset_now' and original.get('autoReset') and not original.get('delayStart') and original.get('nextReset', 0) > 0:
+        # The panel adjusts an existing cycle by the interval delta, rather than
+        # postponing the next reset to a fresh cycle every time it is edited.
+        fields['nextReset'] = max(0, original['nextReset'] + (days - original.get('resetDays', 0)) * 86400)
     if policy == 'delayed_expiry':
         context.user_data['edited_client_expiry'] = 0
     context.user_data.update(
@@ -3562,7 +3598,7 @@ async def delete_user_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @rate_limited(admin_only=False)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global HIDE_SUBSCRIPTION_PORT, WEB_PANEL_ENABLED, ADMIN_TIMEZONE, PAYMENT_CURRENCY
+    global WEB_PANEL_ENABLED, ADMIN_TIMEZONE, PAYMENT_CURRENCY
     query = update.callback_query
     await localized_query_answer(query)
     user_id = query.from_user.id
@@ -3792,40 +3828,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             notice_key = "web_panel_enabled_notice" if WEB_PANEL_BASE_URL else "web_panel_pending_notice"
             await localized_query_answer(query, tr(user_id, notice_key), show_alert=True)
-        elif data == 'settings_subscription_port':
-            if user_id != ADMIN_TELEGRAM_ID:
-                await localized_query_answer(query, "❌ Admin only", show_alert=True)
-                return
-            if HIDE_SUBSCRIPTION_PORT:
-                HIDE_SUBSCRIPTION_PORT = False
-                save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", RUNTIME_SETTINGS_FILE)
-                await query.edit_message_text(
-                    build_admin_tools_settings_text(),
-                    reply_markup=build_admin_tools_settings_keyboard(),
-                )
-                await localized_query_answer(query, tr(user_id, "subscription_port_restored"), show_alert=True)
-            else:
-                await query.edit_message_text(
-                    tr(user_id, "subscription_port_warning"),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            tr(user_id, "confirm_remove_subscription_port"),
-                            callback_data='settings_subscription_port_confirm',
-                        )],
-                        [InlineKeyboardButton(tr(user_id, "cancel"), callback_data='settings_admin_tools')],
-                    ]),
-                )
-        elif data == 'settings_subscription_port_confirm':
-            if user_id != ADMIN_TELEGRAM_ID:
-                await localized_query_answer(query, "❌ Admin only", show_alert=True)
-                return
-            HIDE_SUBSCRIPTION_PORT = True
-            save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", RUNTIME_SETTINGS_FILE)
-            await query.edit_message_text(
-                build_admin_tools_settings_text(),
-                reply_markup=build_admin_tools_settings_keyboard(),
-            )
-            await localized_query_answer(query, tr(user_id, "subscription_port_removed"), show_alert=True)
+
         elif data == 'settings_backup_restore':
             await query.edit_message_text(
                 "💾 SUI Bot Backup & Restore\n\n"
@@ -4086,12 +4089,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             name = clients[0].get("name", "Unknown")
             base_url = await get_subscription_base_url()
-            if SUBSCRIPTION_PUBLIC_ORIGIN and HIDE_SUBSCRIPTION_PORT:
-                base_url = replace_url_origin(base_url, SUBSCRIPTION_PUBLIC_ORIGIN)
+
             main_url, json_url, clash_url = build_subscription_urls(
                 base_url,
                 name,
-                remove_port=HIDE_SUBSCRIPTION_PORT,
+
             )
             msg = (
                 f"{tr(user_id, 'subscription_links')}\n\n"
@@ -4139,6 +4141,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         elif data.startswith('renew_choose_'):
+            sale = sales_store.open_order(user_id)
+            if sale and sale[1]['status'] == 'receipt':
+                await sales_ui.show_order(update, *sale)
+                return
             parts = data.split('_')
             if len(parts) != 4:
                 await localized_query_answer(query, "❌ Invalid option.", show_alert=True)
@@ -4363,7 +4369,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 msg = f"🌐 Online Users ({len(users)} User)\n\n"
                 for i, user in enumerate(users):
-                    msg += f"👤 User: {user}\n"
+                    msg += f"👤 User: {preserve_dynamic_text(user)}\n"
                     if i < len(users) - 1:
                         msg += "\n"
 
@@ -5181,6 +5187,8 @@ async def forward_renewal_receipt(
                 )
             return
         except NetworkError as exc:
+            if isinstance(exc, BadRequest):
+                raise
             if attempt == 3:
                 raise
             logger.warning(
@@ -5192,6 +5200,8 @@ async def forward_renewal_receipt(
 
 
 async def renew_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await sales_ui.receipt(update, context):
+        return
     cleanup_pending_renew_requests()
     user_id = update.effective_user.id
     pending = context.user_data.get('pending_renew_submission')
@@ -5683,7 +5693,7 @@ async def daily_backup(app):
             filepath = os.path.join(BACKUP_DIR, filename)
             await api_client.ensure_session()
             url = f"{api_client.base_url}/apiv2/getdb?exclude=changes,stats"
-            async with api_client.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            async with api_client.session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as response:
                 if response.status != 200:
                     raise Exception(f"HTTP {response.status}")
                 content_length = response.content_length
@@ -5809,7 +5819,7 @@ async def send_cleanup_notification(app, unlinked_details, total_count):
         logger.error(f"Failed to send cleanup notification: {e}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    network_error = isinstance(context.error, NetworkError)
+    network_error = isinstance(context.error, NetworkError) and not isinstance(context.error, BadRequest)
     if network_error:
         logger.warning("Telegram operation was interrupted (%s)", context.error)
     else:
@@ -5826,7 +5836,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def polling_error_callback(error: TelegramError) -> None:
     """Keep transient Telegram long-poll failures concise; Updater retries them."""
-    if isinstance(error, NetworkError):
+    if isinstance(error, NetworkError) and not isinstance(error, BadRequest):
         logger.warning("Telegram polling connection was interrupted (%s); retrying automatically", error)
     else:
         logger.error("Telegram polling error: %s", error)
@@ -6239,6 +6249,8 @@ async def main():
         # abandoned editor (for example, display-name settings) from consuming
         # text intended for a newly started create/edit workflow.
         entry_points=[
+            CommandHandler('start', start),
+            CallbackQueryHandler(sales_callback, pattern='^sales_'),
             CommandHandler('createuser', create_user_start),
             CommandHandler('edituser', edit_user_start),
             CommandHandler('deleteuser', delete_user_start),
@@ -6258,6 +6270,7 @@ async def main():
             ),
         ],
         states={
+            SALES_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sales_text)],
             CREATE_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_name)],
             CREATE_USER_INBOUNDS: [CallbackQueryHandler(create_user_inbound_callback)],
             CREATE_USER_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_volume), CallbackQueryHandler(create_user_volume)],

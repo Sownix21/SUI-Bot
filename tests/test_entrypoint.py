@@ -396,7 +396,9 @@ assert changed_policy["createdAt"] == 1000 and changed_policy["onlineAt"] == 200
 renewed = build_client_renewal_data(original, 95, 5000)
 assert renewed["expiry"] == 5000 and renewed["enable"] is True
 assert renewed["up"] == renewed["down"] == 0
-assert renewed["totalUp"] == renewed["totalDown"] == 0
+assert renewed["totalUp"] == original["totalUp"] + original.get("up", 0)
+assert renewed["totalDown"] == original["totalDown"] + original.get("down", 0)
+assert renewed["delayStart"] is False
 assert renewed["createdAt"] == 1000 and renewed["onlineAt"] == 2000
 assert original["totalUp"] == 456 and original["totalDown"] == 789
 

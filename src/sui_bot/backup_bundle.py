@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .connection_guides import validate_guide_data
+from .sales import validate_sales
 
 BUNDLE_FORMAT = "sui-bot-backup"
 BUNDLE_VERSION = 1
@@ -25,6 +26,7 @@ STATE_KEYS = frozenset({
     "inbounds_cache",
     "expired_notifications",
     "connection_guides",
+    "sales",
 })
 RUNTIME_SETTING_KEYS = frozenset({
     "RENEWAL_MONTHLY_PRICE",
@@ -32,7 +34,6 @@ RUNTIME_SETTING_KEYS = frozenset({
     "PAYMENT_CARD_NUMBER",
     "PAYMENT_CARD_HOLDER",
     "BOT_DISPLAY_NAME",
-    "HIDE_SUBSCRIPTION_PORT",
     "WEB_PANEL_ENABLED",
     "ADMIN_TIMEZONE",
     "PAYMENT_CURRENCY",
@@ -72,7 +73,8 @@ def _validate_state_entry(key: str, value: Any) -> None:
         except (TypeError, ValueError) as exc:
             raise ValueError("language preferences contain an invalid Telegram ID") from exc
     elif key == "runtime_settings":
-        if not isinstance(value, dict) or set(value) - RUNTIME_SETTING_KEYS:
+        # Accept old bundles for migration only; never restore this retired option.
+        if not isinstance(value, dict) or set(value) - (RUNTIME_SETTING_KEYS | {"HIDE_SUBSCRIPTION_PORT"}):
             raise ValueError("runtime settings contain unsupported keys")
         display_name = value.get("BOT_DISPLAY_NAME")
         if display_name is not None:
@@ -95,6 +97,8 @@ def _validate_state_entry(key: str, value: Any) -> None:
             raise ValueError("runtime settings contain an invalid payment currency")
     elif key == "connection_guides":
         validate_guide_data(value)
+    elif key == "sales":
+        validate_sales(value)
     elif key in {"metrics", "subscription_cache", "inbounds_cache", "expired_notifications"} and not isinstance(value, dict):
         raise ValueError(f"{key} must be a JSON object")
 
@@ -112,6 +116,8 @@ def build_bundle(state_paths: Mapping[str, str | Path], configuration: Mapping[s
             raise ValueError(f"state file is too large: {key}")
         value = json.loads(path.read_text(encoding="utf-8"))
         _validate_state_entry(key, value)
+        if key == "runtime_settings":
+            value = {name: setting for name, setting in value.items() if name in RUNTIME_SETTING_KEYS}
         state[key] = value
     payload: dict[str, Any] = {
         "format": BUNDLE_FORMAT,
@@ -180,6 +186,9 @@ def restore_bundle(bundle: Mapping[str, Any], state_paths: Mapping[str, str | Pa
         raise ValueError(f"no restore destination for: {', '.join(sorted(unknown))}")
     restored: list[str] = []
     for key, value in state.items():
+        _validate_state_entry(key, value)
+        if key == "runtime_settings":
+            value = {name: setting for name, setting in value.items() if name in RUNTIME_SETTING_KEYS}
         path = Path(state_paths[key])
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)

@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
-from .config import validate_display_name, validate_optional_https_origin, validate_optional_https_url
+from .config import validate_display_name, validate_optional_https_url
 from .runtime_settings import load_runtime_settings, remove_runtime_setting, save_runtime_setting
 from .security import validate_service_url
 from .web_panel import (
@@ -64,9 +64,8 @@ EDITABLE_FIELDS = [
     ("PAYMENT_CARD_NUMBER", "Payment card number"),
     ("PAYMENT_CARD_HOLDER", "Payment card holder"),
     ("BOT_DISPLAY_NAME", "Message display name"),
-    ("HIDE_SUBSCRIPTION_PORT", "Hide subscription-link port"),
+
     ("WEB_PANEL_BASE_URL", "Web-panel base URL"),
-    ("SUBSCRIPTION_PUBLIC_ORIGIN", "Public subscription origin"),
 ]
 
 
@@ -169,7 +168,7 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_service_url(values["SUI_HOST"], allow_insecure_http=allow_http)
     except (RuntimeError, ValueError) as exc:
         errors.append(str(exc))
-    for boolean_key in ("REDIS_ENABLED", "HIDE_SUBSCRIPTION_PORT"):
+    for boolean_key in ("REDIS_ENABLED",):
         try:
             _bool_value(values.get(boolean_key, "false"))
         except ValueError:
@@ -211,10 +210,10 @@ def validate_environment(values: dict[str, str]) -> list[str]:
             validate_display_name(values["BOT_DISPLAY_NAME"])
         except RuntimeError as exc:
             errors.append(str(exc))
-    for url_key in ("WEB_PANEL_BASE_URL", "SUBSCRIPTION_PUBLIC_ORIGIN"):
+    for url_key in ("WEB_PANEL_BASE_URL",):
         if values.get(url_key):
             try:
-                validator = validate_optional_https_origin if url_key == "SUBSCRIPTION_PUBLIC_ORIGIN" else validate_optional_https_url
+                validator = validate_optional_https_url
                 validator(values[url_key], url_key)
             except RuntimeError as exc:
                 errors.append(str(exc))
@@ -561,10 +560,7 @@ def configure_web_panel() -> None:
     old_config = NGINX_CONFIG.read_bytes() if NGINX_CONFIG.is_file() else None
     old_html = WEB_PANEL_FILE.read_bytes() if WEB_PANEL_FILE.is_file() else None
     old_environment = dict(values)
-    runtime_path = STATE_DIR / "runtime_settings.json"
-    old_runtime_settings = load_runtime_settings(str(runtime_path))
     environment_written = False
-    runtime_written = False
     try:
         WEB_ROOT.mkdir(parents=True, exist_ok=True)
         os.chmod(WEB_ROOT, 0o755)  # noqa: S103 - nginx must traverse the public static web root
@@ -602,14 +598,9 @@ def configure_web_panel() -> None:
         _nginx_test_and_reload()
 
         values["WEB_PANEL_BASE_URL"] = f"https://{domain}:{dashboard_port}/{route}"
-        values["SUBSCRIPTION_PUBLIC_ORIGIN"] = f"https://{domain}"
-        values["HIDE_SUBSCRIPTION_PORT"] = "true"
+
         write_environment(values)
         environment_written = True
-        save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "true", str(runtime_path))
-        runtime_written = True
-        if shutil.which("chown"):
-            shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
         if systemctl("restart") != 0:
             raise RuntimeError("SUI Bot failed to restart with the web-panel configuration")
     except BaseException:
@@ -623,17 +614,6 @@ def configure_web_panel() -> None:
             WEB_PANEL_FILE.write_bytes(old_html)
         if environment_written:
             write_environment(old_environment)
-        if runtime_written:
-            if "HIDE_SUBSCRIPTION_PORT" in old_runtime_settings:
-                save_runtime_setting(
-                    "HIDE_SUBSCRIPTION_PORT",
-                    str(old_runtime_settings["HIDE_SUBSCRIPTION_PORT"]),
-                    str(runtime_path),
-                )
-            else:
-                remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(runtime_path))
-            if shutil.which("chown"):
-                shutil.chown(runtime_path, user=SERVICE_USER, group=SERVICE_USER)
         try:
             _nginx_test_and_reload()
         except (OSError, subprocess.SubprocessError):
@@ -644,7 +624,7 @@ def configure_web_panel() -> None:
 
     print("\nSUI Bot web panel enabled successfully.")
     print(f"User URL format: https://{domain}:{dashboard_port}/{route}/<S-UI-username>")
-    print("Clean portless subscription URLs were enabled automatically.")
+    print("Subscription URLs continue to use the panel subURI setting.")
     print("Enable the user-facing Web Panel button from Telegram: Admin Settings -> Enable Web Panel.")
 
 
@@ -665,11 +645,10 @@ def remove_web_panel(*, confirmed: bool = False) -> None:
         if shutil.which("nginx"):
             _nginx_test_and_reload()
         values["WEB_PANEL_BASE_URL"] = ""
-        values["SUBSCRIPTION_PUBLIC_ORIGIN"] = ""
-        values["HIDE_SUBSCRIPTION_PORT"] = "false"
+
         write_environment(values)
         environment_written = True
-        save_runtime_setting("HIDE_SUBSCRIPTION_PORT", "false", str(runtime_path))
+
         runtime_written = True
         save_runtime_setting("WEB_PANEL_ENABLED", "false", str(runtime_path))
         if shutil.which("chown"):
@@ -688,14 +667,7 @@ def remove_web_panel(*, confirmed: bool = False) -> None:
         if environment_written:
             write_environment(old_environment)
         if runtime_written:
-            if "HIDE_SUBSCRIPTION_PORT" in old_runtime_settings:
-                save_runtime_setting(
-                    "HIDE_SUBSCRIPTION_PORT",
-                    str(old_runtime_settings["HIDE_SUBSCRIPTION_PORT"]),
-                    str(runtime_path),
-                )
-            else:
-                remove_runtime_setting("HIDE_SUBSCRIPTION_PORT", str(runtime_path))
+
             if "WEB_PANEL_ENABLED" in old_runtime_settings:
                 save_runtime_setting(
                     "WEB_PANEL_ENABLED",

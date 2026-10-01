@@ -95,30 +95,11 @@ def build_web_panel_url(web_panel_base: str, username: str, display_name: str | 
     return url
 
 
-def replace_url_origin(url: str, public_origin: str) -> str:
-    """Replace only scheme/netloc while retaining the S-UI subscription path."""
-    parsed = urlsplit(url)
-    origin = urlsplit(public_origin)
-    try:
-        _ = origin.port
-    except ValueError as exc:
-        raise ValueError("invalid public subscription origin") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("invalid subscription URL")
-    if origin.scheme != "https" or not origin.hostname or origin.path not in {"", "/"}:
-        raise ValueError("public subscription origin must be an HTTPS origin without a path")
-    if origin.username or origin.password or origin.query or origin.fragment:
-        raise ValueError("invalid public subscription origin")
-    return urlunsplit((origin.scheme, origin.netloc, parsed.path, parsed.query, parsed.fragment))
-
-
 def build_subscription_urls(
     subscription_base: str,
     username: str,
-    *,
-    remove_port: bool = False,
 ) -> tuple[str, str, str]:
-    """Build user links, optionally omitting only the URL's explicit port."""
+    """Build links using the panel subscription URI without rewriting its port."""
     parsed = urlsplit(subscription_base)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("invalid subscription base URL")
@@ -128,13 +109,7 @@ def build_subscription_urls(
         raise ValueError("invalid subscription base URL port") from exc
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("subscription base URL must not contain credentials")
-    if remove_port:
-        hostname = parsed.hostname
-        if ":" in hostname:
-            hostname = f"[{hostname}]"
-        base = urlunsplit((parsed.scheme, hostname, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
-    else:
-        base = subscription_base.rstrip("/")
+    base = subscription_base.rstrip("/")
     encoded_name = quote(username, safe="")
     main = f"{base}/{encoded_name}/"
     return main, f"{main}?format=json", f"{main}?format=clash"

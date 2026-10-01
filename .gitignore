@@ -36,6 +36,17 @@ metrics.json
 runtime_settings.json
 subscription_cache.json
 connection_guides.json
+sales.json
+renew_requests.json
+user_languages.json
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+sui-bot.env
+.test-venv/
+.test-tmp/
 
 # Local S-UI source used for compatibility checks; not part of the bot package.
 PANEL/

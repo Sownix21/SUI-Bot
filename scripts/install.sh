@@ -6,8 +6,12 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ ! -f ${SOURCE_DIR}/pyproject.toml ]]; then
+script_path="${BASH_SOURCE[0]:-}"
+SOURCE_DIR=""
+if [[ -n ${script_path} ]]; then
+  SOURCE_DIR="$(cd "$(dirname "${script_path}")/.." && pwd)"
+fi
+if [[ -z ${SOURCE_DIR} || ! -f ${SOURCE_DIR}/pyproject.toml ]]; then
   for command in curl tar mktemp; do
     command -v "${command}" >/dev/null || { echo "Missing required command: ${command}" >&2; exit 1; }
   done

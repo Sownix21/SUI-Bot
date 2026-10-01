@@ -6,7 +6,6 @@ from sui_bot.sui_metadata import (
     build_web_panel_url,
     extract_load_metadata,
     extract_partial_metadata,
-    replace_url_origin,
 )
 
 
@@ -29,10 +28,10 @@ def test_load_metadata_preserves_subscription_port_and_path():
     assert clash_url == f"{main}?format=clash"
 
 
-def test_subscription_port_can_be_removed_without_changing_path_or_token():
-    base = "https://subscription.example.com:2096/token-part/nested"
+def test_portless_panel_uri_is_used_without_rewriting():
+    base = "https://subscription.example.com/token-part/nested"
 
-    main, json_url, clash_url = build_subscription_urls(base, "test user", remove_port=True)
+    main, json_url, clash_url = build_subscription_urls(base, "test user")
 
     assert main == "https://subscription.example.com/token-part/nested/test%20user/"
     assert json_url == f"{main}?format=json"
@@ -65,25 +64,32 @@ def test_partial_metadata_prefers_explicit_sub_uri_and_validates_port():
         )
 
 
-def test_subscription_port_removal_preserves_ipv6_host_syntax():
-    main, _, _ = build_subscription_urls("https://[2001:db8::1]:2096/sub", "alice", remove_port=True)
+def test_blank_subscription_uri_uses_panel_host_and_default_subscription_listener():
+    assert build_subscription_base_from_settings(
+        {"subURI": "", "subDomain": "", "subPort": "2096", "subPath": "/sub/",
+         "subKeyFile": "", "subCertFile": ""},
+        "https://panel.example.com:2053/custom-panel-path",
+    ) == "http://panel.example.com:2096/sub"
+    assert build_subscription_base_from_settings(
+        {"subURI": "", "subPort": "2096", "subPath": "subscription", "subKeyFile": "/key", "subCertFile": "/cert"},
+        "https://[2001:db8::1]:2053/private-panel",
+    ) == "https://[2001:db8::1]:2096/subscription"
 
-    assert main == "https://[2001:db8::1]/sub/alice/"
+
+def test_subscription_uri_preserves_ipv6_host_and_port():
+    main, _, _ = build_subscription_urls("https://[2001:db8::1]:2096/sub", "alice")
+
+    assert main == "https://[2001:db8::1]:2096/sub/alice/"
 
 
 def test_subscription_url_rejects_embedded_credentials():
     with pytest.raises(ValueError, match="credentials"):
-        build_subscription_urls("https://user:pass@example.com:2096/sub", "alice", remove_port=True)
+        build_subscription_urls("https://user:pass@example.com:2096/sub", "alice")
 
 
 def test_subscription_url_rejects_invalid_port():
     with pytest.raises(ValueError, match="port"):
-        build_subscription_urls("https://example.com:not-a-port/sub", "alice", remove_port=True)
-
-
-def test_public_origin_replaces_host_without_changing_subscription_path():
-    result = replace_url_origin("https://old.example.com:2096/secret/path", "https://new.example.com")
-    assert result == "https://new.example.com/secret/path"
+        build_subscription_urls("https://example.com:not-a-port/sub", "alice")
 
 
 def test_web_panel_url_uses_configured_owner_route():

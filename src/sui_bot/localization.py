@@ -335,13 +335,7 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "enter_display_name": "Enter a new name for the bot's messages (2-48 characters). This does not change its Telegram profile name or @username.\n\nCancel: /cancel",
         "display_name_updated": "✅ Message display name updated to: {name}. The Telegram profile name was not changed.",
         "display_name_invalid": "❌ Enter a display name containing 2-48 visible characters.",
-        "subscription_link_mode": "🌐 Subscription-link port", "subscription_port_hidden": "Removed",
-        "subscription_port_kept": "Kept", "remove_subscription_port": "🌐 Remove port from subscription links",
-        "keep_subscription_port": "🌐 Restore port in subscription links",
-        "subscription_port_warning": "⚠️ Important warning\n\nS-UI normally serves subscription links on an explicit port. Enabling this option removes that port only from links shown by this bot.\n\nBefore proceeding, configure nginx, another reverse proxy, or equivalent routing so requests without the port reach the S-UI subscription service. Otherwise, all cleaned subscription links will fail.\n\nThe bot does not configure your server automatically.",
-        "confirm_remove_subscription_port": "⚠️ I understand — remove port",
-        "subscription_port_removed": "✅ The port is now removed from subscription links shown by the bot.",
-        "subscription_port_restored": "✅ Subscription links will include the S-UI port again.",
+
         "web_panel_setting": "🌐 Web panel", "web_panel_enabled": "Enabled and configured",
         "web_panel_disabled": "Disabled", "web_panel_pending": "Enabled — awaiting Linux setup",
         "enable_web_panel": "🌐 Enable Web Panel", "disable_web_panel": "🌐 Disable Web Panel",
@@ -366,13 +360,7 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "enter_display_name": "نام جدیدی برای پیام‌های ربات وارد کنید (۲ تا ۴۸ نویسه). این گزینه نام نمایه تلگرام یا نام کاربری ربات را تغییر نمی‌دهد.\n\nلغو: /cancel",
         "display_name_updated": "✅ نام نمایشی پیام‌ها به {name} تغییر کرد. نام نمایه تلگرام تغییر نکرد.",
         "display_name_invalid": "❌ یک نام نمایشی شامل ۲ تا ۴۸ نویسه قابل مشاهده وارد کنید.",
-        "subscription_link_mode": "🌐 پورت لینک اشتراک", "subscription_port_hidden": "حذف می‌شود",
-        "subscription_port_kept": "حفظ می‌شود", "remove_subscription_port": "🌐 حذف پورت از لینک‌های اشتراک",
-        "keep_subscription_port": "🌐 بازگرداندن پورت لینک‌های اشتراک",
-        "subscription_port_warning": "⚠️ هشدار مهم\n\nS-UI معمولاً لینک‌های اشتراک را روی یک پورت مشخص ارائه می‌کند. فعال‌کردن این گزینه فقط پورت را از لینک‌هایی که ربات نمایش می‌دهد حذف می‌کند.\n\nپیش از ادامه، nginx یا یک reverse proxy یا مسیریابی معادل را طوری تنظیم کنید که درخواست‌های بدون پورت به سرویس اشتراک S-UI برسند؛ در غیر این صورت همه لینک‌های پاک‌سازی‌شده از کار خواهند افتاد.\n\nربات تنظیمات سرور را به‌صورت خودکار انجام نمی‌دهد.",
-        "confirm_remove_subscription_port": "⚠️ متوجه شدم — پورت حذف شود",
-        "subscription_port_removed": "✅ اکنون پورت از لینک‌های اشتراک نمایش‌داده‌شده توسط ربات حذف می‌شود.",
-        "subscription_port_restored": "✅ پورت S-UI دوباره در لینک‌های اشتراک نمایش داده می‌شود.",
+
         "web_panel_setting": "🌐 پنل وب", "web_panel_enabled": "فعال و پیکربندی‌شده",
         "web_panel_disabled": "غیرفعال", "web_panel_pending": "فعال — منتظر راه‌اندازی لینوکس",
         "enable_web_panel": "🌐 فعال‌کردن پنل وب", "disable_web_panel": "🌐 غیرفعال‌کردن پنل وب",
@@ -397,13 +385,7 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "enter_display_name": "Введите новое имя для сообщений бота (2–48 символов). Имя профиля Telegram и @username не изменятся.\n\nОтмена: /cancel",
         "display_name_updated": "✅ Имя в сообщениях изменено на: {name}. Имя профиля Telegram не изменялось.",
         "display_name_invalid": "❌ Введите отображаемое имя из 2–48 видимых символов.",
-        "subscription_link_mode": "🌐 Порт ссылок подписки", "subscription_port_hidden": "Удаляется",
-        "subscription_port_kept": "Сохраняется", "remove_subscription_port": "🌐 Удалить порт из ссылок подписки",
-        "keep_subscription_port": "🌐 Вернуть порт в ссылки подписки",
-        "subscription_port_warning": "⚠️ Важное предупреждение\n\nS-UI обычно обслуживает ссылки подписки на указанном порту. Эта настройка удаляет порт только из ссылок, показываемых ботом.\n\nПеред продолжением настройте nginx, другой обратный прокси или эквивалентную маршрутизацию, чтобы запросы без порта попадали в сервис подписок S-UI. Иначе все очищенные ссылки перестанут работать.\n\nБот не настраивает сервер автоматически.",
-        "confirm_remove_subscription_port": "⚠️ Понимаю — удалить порт",
-        "subscription_port_removed": "✅ Порт удалён из ссылок подписки, показываемых ботом.",
-        "subscription_port_restored": "✅ Порт S-UI снова будет добавляться в ссылки подписки.",
+
         "web_panel_setting": "🌐 Веб-панель", "web_panel_enabled": "Включена и настроена",
         "web_panel_disabled": "Отключена", "web_panel_pending": "Включена — ожидает настройки Linux",
         "enable_web_panel": "🌐 Включить веб-панель", "disable_web_panel": "🌐 Отключить веб-панель",
@@ -428,13 +410,7 @@ RENEWAL_TRANSLATIONS: dict[str, dict[str, str]] = {
         "enter_display_name": "请输入用于机器人消息的新名称（2–48 个字符）。这不会更改 Telegram 资料名称或 @username。\n\n取消：/cancel",
         "display_name_updated": "✅ 消息显示名称已更新为：{name}。Telegram 资料名称未更改。",
         "display_name_invalid": "❌ 请输入包含 2–48 个可见字符的显示名称。",
-        "subscription_link_mode": "🌐 订阅链接端口", "subscription_port_hidden": "已移除",
-        "subscription_port_kept": "已保留", "remove_subscription_port": "🌐 从订阅链接中移除端口",
-        "keep_subscription_port": "🌐 恢复订阅链接端口",
-        "subscription_port_warning": "⚠️ 重要警告\n\nS-UI 通常通过明确端口提供订阅链接。启用后，只会从机器人显示的链接中移除该端口。\n\n继续之前，请配置 nginx、其他反向代理或等效路由，使不带端口的请求能够到达 S-UI 订阅服务，否则所有清理后的订阅链接都会失效。\n\n机器人不会自动配置服务器。",
-        "confirm_remove_subscription_port": "⚠️ 我已了解 — 移除端口",
-        "subscription_port_removed": "✅ 机器人显示的订阅链接已移除端口。",
-        "subscription_port_restored": "✅ 订阅链接将重新包含 S-UI 端口。",
+
         "web_panel_setting": "🌐 网页面板", "web_panel_enabled": "已启用并已配置",
         "web_panel_disabled": "已禁用", "web_panel_pending": "已启用——等待 Linux 配置",
         "enable_web_panel": "🌐 启用网页面板", "disable_web_panel": "🌐 禁用网页面板",
@@ -678,3 +654,11 @@ GUIDE_AND_EXPIRY_TRANSLATIONS: dict[str, dict[str, str]] = {
 
 for _language, _messages in GUIDE_AND_EXPIRY_TRANSLATIONS.items():
     TRANSLATIONS[_language].update(_messages)
+
+for _language, _text in {
+    "en": "Delay start cannot be enabled after the account has traffic, matching the panel. Choose standard expiry or periodic reset instead.",
+    "fa": "مطابق پنل، پس از ثبت مصرف نمی‌توان شروع تأخیری را فعال کرد. انقضای عادی یا بازنشانی دوره‌ای را انتخاب کنید.",
+    "ru": "Как и в панели, отложенный старт нельзя включить после появления трафика. Выберите обычный срок или периодический сброс.",
+    "zh": "与面板一致，账户产生流量后无法启用延迟启动。请选择标准到期或定期重置。",
+}.items():
+    TRANSLATIONS[_language]["delay_start_used"] = _text

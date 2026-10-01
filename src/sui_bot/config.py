@@ -46,16 +46,6 @@ def validate_optional_https_url(value: Any, name: str) -> str:
     return normalized
 
 
-def validate_optional_https_origin(value: Any, name: str) -> str:
-    normalized = validate_optional_https_url(value, name)
-    if normalized:
-        from urllib.parse import urlsplit
-
-        if urlsplit(normalized).path not in {"", "/"}:
-            raise RuntimeError(f"{name} must not contain a path")
-    return normalized
-
-
 def _load_local_env() -> None:
     configured = os.getenv("SUI_BOT_ENV_FILE")
     if configured:
@@ -118,9 +108,8 @@ class Settings:
     payment_card_number: str
     payment_card_holder: str
     bot_display_name: str
-    hide_subscription_port: bool
+
     web_panel_base_url: str
-    subscription_public_origin: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -153,11 +142,8 @@ class Settings:
             payment_card_number=str(env("PAYMENT_CARD_NUMBER", "0000-0000-0000-0000")),
             payment_card_holder=str(env("PAYMENT_CARD_HOLDER", "")),
             bot_display_name=validate_display_name(env("BOT_DISPLAY_NAME", "SUI Bot")),
-            hide_subscription_port=env_bool("HIDE_SUBSCRIPTION_PORT", False),
+
             web_panel_base_url=validate_optional_https_url(env("WEB_PANEL_BASE_URL", ""), "WEB_PANEL_BASE_URL"),
-            subscription_public_origin=validate_optional_https_origin(
-                env("SUBSCRIPTION_PUBLIC_ORIGIN", ""), "SUBSCRIPTION_PUBLIC_ORIGIN"
-            ),
         )
         settings.validate()
         return settings
