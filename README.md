@@ -112,6 +112,3 @@ Guide media and receipts use Telegram file references; restore them with the sam
 
 For migration from an older installation, stop the bot before copying its state, preserve the filenames, and give the `sui-bot` service user ownership. Copying only a panel database does not restore Telegram assignments.
 
-## 🔒 Before publishing or sharing
-
-Do not upload live credentials, state files, database backups, logs, or private keys. They are excluded by `.gitignore`. The local `PANEL` reference source is also excluded. Keep `tests`, `.github`, `src`, `deploy`, and `scripts`: they belong to the repository.
