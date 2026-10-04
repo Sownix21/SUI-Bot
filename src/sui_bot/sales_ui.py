@@ -12,7 +12,7 @@ import time
 from decimal import Decimal, InvalidOperation
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ConversationHandler
 
 from .sales import OPEN_STATUSES, SalesStore, validate_plan
@@ -308,7 +308,7 @@ class SalesUI:
         }
         return await self.prompt(update, context)
 
-    async def prompt(self, update, context):
+    async def prompt(self, update, context, *, update_keyboard=False):
         draft = context.user_data["sales_draft"]
         uid = update.effective_user.id
         fields = PLAN_FIELDS if draft["kind"] == "plan" else ACCOUNT_FIELDS
@@ -316,9 +316,13 @@ class SalesUI:
         prefix = f"sales_w_{draft['token']}_"
         rows = []
         if field == "inbounds":
-            inbounds = await self.b.get_inbounds_list(force_refresh=True)
+            # Keep a stable list for this picker; toggles/pages need no panel request.
+            if "inbound_options" not in draft:
+                draft["inbound_options"] = await self.b.get_inbounds_list(force_refresh=True)
+            inbounds = draft["inbound_options"]
             draft["allowed_inbounds"] = [int(i["id"]) for i in inbounds]
-            page = draft.get("page", 0)
+            page = min(max(0, draft.get("page", 0)), max(0, (len(inbounds) - 1) // 15))
+            draft["page"] = page
             for inbound in inbounds[page * 15 : page * 15 + 15]:
                 key = int(inbound["id"])
                 label = ("✅ " if key in draft["data"]["inbounds"] else "") + str(inbound.get("tag", key))[:55]
@@ -343,7 +347,18 @@ class SalesUI:
             if field == "volume":
                 value = value / 1024**3
             text += f"\n[{value}]"
-        await self.say(update, text + "\n/cancel", rows)
+        if update_keyboard:
+            try:
+                # Use the localized text-edit path so protected labels are decoded too.
+                await update.callback_query.edit_message_text(
+                    self.b.preserve_dynamic_text(text + "\n/cancel"), reply_markup=InlineKeyboardMarkup(rows)
+                )
+            except BadRequest as exc:
+                # Repeated page callbacks can legitimately produce identical markup.
+                if "message is not modified" not in str(exc).lower():
+                    raise
+        else:
+            await self.say(update, text + "\n/cancel", rows)
         return SALES_INPUT
 
     async def text(self, update, context):
@@ -439,7 +454,7 @@ class SalesUI:
             draft["step"] += 1
         else:
             raise ValueError("wrong step")
-        return await self.prompt(update, context)
+        return await self.prompt(update, context, update_keyboard=field == "inbounds")
 
     async def receipt(self, update, context) -> bool:
         uid = update.effective_user.id

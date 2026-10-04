@@ -6,7 +6,7 @@ import pytest
 
 from sui_bot.sales import SalesStore, validate_plan
 from sui_bot.sales_i18n import LANGUAGES, MESSAGES, sale_text
-from sui_bot.sales_ui import SALES_INPUT, SalesUI
+from sui_bot.sales_ui import ACCOUNT_FIELDS, PLAN_FIELDS, SALES_INPUT, SalesUI
 
 
 def plan(**overrides):
@@ -113,7 +113,9 @@ def update(uid=1, data="sales_admin", text=None):
         effective_chat=SimpleNamespace(type="private"),
         effective_message=message,
         message=message,
-        callback_query=SimpleNamespace(data=data, answer=AsyncMock(), from_user=SimpleNamespace(id=uid)),
+        callback_query=SimpleNamespace(
+            data=data, answer=AsyncMock(), edit_message_text=AsyncMock(), from_user=SimpleNamespace(id=uid)
+        ),
     )
 
 
@@ -238,6 +240,73 @@ async def test_plan_wizard_validation_and_optional_text(bot, store):
     saved = next(iter(store.data["plans"].values()))
     assert saved["group"] == saved["desc"] == saved["remark"] == ""
     assert saved["inbounds"] == [9] and saved["delayed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,key", [("plan", None), ("plan", "existing"), ("account", "order")])
+async def test_inbound_picker_edits_same_keyboard_and_fetches_once(bot, kind, key):
+    bot.get_inbounds_list.return_value = [{"id": i, "tag": f"inbound-{i}"} for i in range(1, 18)]
+    ctx, event = context(), update()
+    fields = PLAN_FIELDS if kind == "plan" else ACCOUNT_FIELDS
+    ctx.user_data["sales_draft"] = {
+        "token": "picker",
+        "kind": kind,
+        "key": key,
+        "step": fields.index("inbounds"),
+        "data": plan(inbounds=[]),
+    }
+    assert await bot.sales_ui.prompt(event, ctx) == SALES_INPUT
+    event.effective_message.reply_text.assert_awaited_once()
+    event.callback_query.edit_message_text.assert_not_awaited()
+
+    async def click(choice):
+        event.callback_query.data = "sales_w_picker_" + choice
+        assert await bot.sales_ui.callback(event, ctx) == SALES_INPUT
+        markup = event.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        return {
+            b.callback_data: bot.localize_outgoing_text("en", b.text) for row in markup.inline_keyboard for b in row
+        }
+
+    buttons = await click("in_1")
+    assert "✅" in buttons["sales_w_picker_in_1"]
+    buttons = await click("page_1")
+    assert "sales_w_picker_in_16" in buttons and "sales_w_picker_in_1" not in buttons
+    buttons = await click("in_16")
+    assert "✅" in buttons["sales_w_picker_in_16"]
+    buttons = await click("page_0")
+    assert "✅" in buttons["sales_w_picker_in_1"]
+    buttons = await click("in_1")
+    assert "✅" not in buttons["sales_w_picker_in_1"]
+    assert ctx.user_data["sales_draft"]["data"]["inbounds"] == [16]
+    buttons = await click("page_999")
+    assert ctx.user_data["sales_draft"]["page"] == 1
+    assert "✅" in buttons["sales_w_picker_in_16"]
+    event.effective_message.reply_text.assert_awaited_once()
+    assert event.callback_query.edit_message_text.await_count == 6
+    bot.get_inbounds_list.assert_awaited_once_with(force_refresh=True)
+
+
+@pytest.mark.asyncio
+async def test_inbound_picker_only_ignores_unchanged_markup_error(bot):
+    from telegram.error import BadRequest
+
+    ctx, event = context(), update()
+    ctx.user_data["sales_draft"] = {
+        "token": "picker",
+        "kind": "plan",
+        "key": None,
+        "step": PLAN_FIELDS.index("inbounds"),
+        "data": plan(),
+    }
+    await bot.sales_ui.prompt(event, ctx)
+    event.callback_query.data = "sales_w_picker_page_0"
+    event.callback_query.edit_message_text.side_effect = BadRequest("Message is not modified")
+    assert await bot.sales_ui.callback(event, ctx) == SALES_INPUT
+    event.effective_message.reply_text.assert_awaited_once()
+    event.callback_query.edit_message_text.side_effect = BadRequest("Message can't be edited")
+    with pytest.raises(BadRequest, match="can't be edited"):
+        await bot.sales_ui.callback(event, ctx)
+    event.effective_message.reply_text.assert_awaited_once()
 
 
 @pytest.mark.asyncio
