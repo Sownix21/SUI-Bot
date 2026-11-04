@@ -1,6 +1,12 @@
 """Fixed required-membership prompts in all supported bot languages."""
 
 MESSAGES = {
+    "inactive": (
+        "This bot is not active for your account. Contact the administrator to have a subscription assigned. You can choose your language below.",
+        "این ربات برای حساب شما فعال نیست. برای تخصیص اشتراک با مدیر تماس بگیرید. می‌توانید زبان خود را در پایین انتخاب کنید.",
+        "Бот недоступен для вашего аккаунта. Обратитесь к администратору для привязки подписки. Выберите язык ниже.",
+        "此机器人尚未为您的账号开通。请联系管理员绑定订阅。您可以在下方选择语言。",
+    ),
     "title": (
         "📢 Required channels / groups",
         "📢 کانال‌ها و گروه‌های اجباری",

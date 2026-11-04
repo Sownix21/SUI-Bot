@@ -443,3 +443,221 @@ async def test_start_clears_abandoned_editor(bot):
     ctx.user_data["sales_draft"] = {"step": 3}
     assert await bot.start.__wrapped__(event, ctx) == -1
     assert ctx.user_data == {}
+
+
+def custom_config(**overrides):
+    return {**plan(delayed=False), "price_gb": 20, "price_day": 5, "max_gb": 500, "max_days": 365, **overrides}
+
+
+@pytest.mark.parametrize("rates,gb,days,price", [((20, 5), 10, 30, 350), ((20, 0), 10, 30, 200), ((0, 5), 50, 10, 50)])
+def test_custom_pricing_and_immutable_order_snapshot(store, rates, gb, days, price):
+    from sui_bot.sales import custom_plan
+
+    config = custom_config(price_gb=rates[0], price_day=rates[1])
+    assert custom_plan(config, gb, days)["price"] == price
+    store.configure(enabled=True, custom_enabled=True, custom=config, mode="automatic")
+    key, order = store.checkout_custom(42, gb, days, config)
+    assert order["plan"]["price"] == price
+    store.configure(custom={**config, "price_gb": 25})
+    assert SalesStore(store.path).data["orders"][key]["plan"]["price"] == price
+    with pytest.raises(ValueError, match="pricing changed"):
+        store.checkout_custom(99, gb, days, config)
+
+
+@pytest.mark.parametrize("gb,days", [(0, 30), (-1, 30), (501, 30), (1, 0), (1, 366), (True, 1), (1.5, 1)])
+def test_custom_pricing_rejects_invalid_quantities(gb, days):
+    from sui_bot.sales import custom_plan
+
+    with pytest.raises(ValueError):
+        custom_plan(custom_config(), gb, days)
+
+
+@pytest.mark.asyncio
+async def test_custom_admin_wizard_and_buyer_purchase(bot, store):
+    from sui_bot.sales_ui import CUSTOM_BUY_INPUT
+
+    ctx = context()
+    await bot.sales_ui.callback(update(data="sales_a_custom_config"), ctx)
+    for value in ("20", "5", "30", "50", "500", "365", "1"):
+        assert await bot.sales_ui.text(update(text=value), ctx) == SALES_INPUT
+    token = ctx.user_data["sales_draft"]["token"]
+    await bot.sales_ui.callback(update(data=f"sales_w_{token}_in_9"), ctx)
+    await bot.sales_ui.callback(update(data=f"sales_w_{token}_done"), ctx)
+    assert store.data["custom"]["inbounds"] == [9]
+    await bot.sales_ui.callback(update(data="sales_a_custom_toggle"), ctx)
+    assert store.data["custom_enabled"] and not store.data["enabled"]
+    await bot.sales_ui.callback(update(data="sales_a_toggle"), ctx)
+    assert store.data["enabled"] and not store.data["plans"]
+    assert await bot.sales_ui.callback(update(42, "sales_shop"), ctx) == CUSTOM_BUY_INPUT
+    for value in ("10", "30"):
+        assert await bot.sales_ui.custom_text(update(42, text=value), ctx) == CUSTOM_BUY_INPUT
+    assert not store.data["orders"]
+    token = ctx.user_data["custom_purchase"]["token"]
+    await bot.sales_ui.callback(update(42, f"sales_custom_confirm_{token}"), ctx)
+    order = store.open_order(42)[1]
+    assert order["status"] == "receipt" and order["plan"]["price"] == 350
+    assert order["plan"]["volume"] == 10 * 1024**3 and order["plan"]["delayed"]
+    await bot.sales_ui.callback(update(42, f"sales_custom_confirm_{token}"), ctx)
+    assert len(store.data["orders"]) == 1
+    before = copy.deepcopy(store.data)
+    for action in ("sales_a_custom_config", "sales_a_custom_toggle"):
+        await bot.sales_ui.callback(update(42, action), context())
+    assert store.data == before
+
+
+@pytest.mark.asyncio
+async def test_custom_quotes_rejected_after_price_change_or_sales_disabled(bot, store):
+    config = custom_config()
+    store.configure(enabled=True, custom_enabled=True, custom=config)
+    ctx = context()
+    await bot.sales_ui.callback(update(42, "sales_shop"), ctx)
+    for value in ("10", "30"):
+        await bot.sales_ui.custom_text(update(42, text=value), ctx)
+    token = ctx.user_data["custom_purchase"]["token"]
+    store.configure(custom={**config, "price_gb": 30})
+    await bot.sales_ui.callback(update(42, f"sales_custom_confirm_{token}"), ctx)
+    assert not store.data["orders"]
+    store.configure(custom=config, enabled=False)
+    await bot.sales_ui.callback(update(42, f"sales_custom_confirm_{token}"), ctx)
+    assert not store.data["orders"]
+
+
+@pytest.mark.asyncio
+async def test_alert_controls_permissions_validation_persistence(bot, monkeypatch, tmp_path):
+    from sui_bot.admin_tools import ALERT_INPUT, AdminTools
+    from sui_bot.runtime_settings import load_runtime_settings
+
+    path = str(tmp_path / "runtime.json")
+    monkeypatch.setattr(bot, "RUNTIME_SETTINGS_FILE", path)
+    monkeypatch.setattr(bot, "CPU_ALERT_THRESHOLD", 90)
+    tools, ctx = AdminTools(bot), context()
+    assert await tools.callback(update(42, "tools_CPU"), ctx) == -1
+    assert not ctx.user_data
+    assert await tools.callback(update(data="tools_CPU"), ctx) == ALERT_INPUT
+    for value in ("0", "101", "80.5", "bad"):
+        assert await tools.text(update(text=value), ctx) == ALERT_INPUT
+    assert await tools.text(update(text="70"), ctx) == -1
+    assert bot.CPU_ALERT_THRESHOLD == 70
+    assert load_runtime_settings(path)["CPU_ALERT_THRESHOLD"] == "70"
+
+
+@pytest.mark.asyncio
+async def test_manual_panel_backup_is_bounded_private_and_cleaned(bot, monkeypatch):
+    from sui_bot.admin_tools import AdminTools
+    from sui_bot.backup import SQLITE_HEADER
+
+    class Response:
+        status = 200
+        content_length = len(SQLITE_HEADER)
+        content = SimpleNamespace()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    async def chunks(size):
+        yield SQLITE_HEADER
+
+    Response.content.iter_chunked = chunks
+    response = Response()
+    session = SimpleNamespace(get=Mock(return_value=response))
+    monkeypatch.setattr(bot.api_client, "ensure_session", AsyncMock())
+    monkeypatch.setattr(bot.api_client, "session", session)
+    tools, ctx = AdminTools(bot), context()
+    await tools.callback(update(42, "tools_backup"), ctx)
+    session.get.assert_not_called()
+    paths = []
+
+    async def send(**kwargs):
+        from pathlib import Path
+
+        assert kwargs["chat_id"] == 1
+        assert kwargs["document"].read() == SQLITE_HEADER
+        paths.append(Path(kwargs["document"].name))
+
+    ctx.bot.send_document.side_effect = send
+    await tools.callback(update(data="tools_backup"), ctx)
+    assert len(paths) == 1 and not paths[0].exists()
+    assert session.get.call_args.kwargs["allow_redirects"] is False
+    response.content_length = bot.BACKUP_MAX_BYTES + 1
+    await tools.callback(update(data="tools_backup"), ctx)
+    assert ctx.bot.send_document.await_count == 1
+
+
+def test_custom_settings_and_thresholds_backup_restore(store, tmp_path):
+    from sui_bot.backup_bundle import build_bundle, restore_bundle
+
+    store.configure(custom=custom_config(), custom_enabled=True)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text('{"CPU_ALERT_THRESHOLD":"75","RAM_ALERT_THRESHOLD":"65"}', encoding="utf-8")
+    bundle = build_bundle({"sales": store.path, "runtime_settings": runtime}, {})
+    destination = tmp_path / "restored-sales.json"
+    restore_bundle(bundle, {"sales": destination, "runtime_settings": tmp_path / "restored-runtime.json"})
+    assert SalesStore(destination).data["custom"] == custom_config()
+    runtime.write_text('{"CPU_ALERT_THRESHOLD":"101"}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        build_bundle({"runtime_settings": runtime}, {})
+
+
+def test_private_menu_contains_only_language(bot, store):
+    markup = bot.get_main_menu_keyboard(False, 42)
+    assert [button.callback_data for row in markup.inline_keyboard for button in row] == ["language_settings"]
+    bot.telegram_clients[42] = [9]
+    markup = bot.get_main_menu_keyboard(False, 42)
+    assert "my_usage" in [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+def test_latest_panel_client_edit_and_renewal_contract(bot):
+    original = {
+        **bot.build_client_data_new("alice", 1000, 1000000, "", "", [9]),
+        "id": 7,
+        "up": 20,
+        "down": 30,
+        "totalUp": 100,
+        "totalDown": 200,
+        "createdAt": 123,
+        "onlineAt": 456,
+    }
+    edited = bot.build_client_data_edit(7, "alice", 2000, 2000000, "", "", [9], original_client=original)
+    for field in ("up", "down", "totalUp", "totalDown", "createdAt", "onlineAt", "config"):
+        assert edited[field] == original[field]
+    renewed = bot.build_client_renewal_data(original, 7, 2000000)
+    assert renewed["up"] == renewed["down"] == 0
+    assert (renewed["totalUp"], renewed["totalDown"]) == (120, 230)
+    assert renewed["createdAt"] == 123 and renewed["onlineAt"] == 456
+    # The panel's first-traffic reset uses resetDays for either expiry OR nextReset.
+    assert bot.lifecycle_fields("delayed_expiry", 15) == {
+        "delayStart": True,
+        "autoReset": False,
+        "resetDays": 15,
+        "nextReset": 0,
+    }
+    assert bot.lifecycle_fields("reset_first", 15) == {
+        "delayStart": True,
+        "autoReset": True,
+        "resetDays": 15,
+        "nextReset": 0,
+    }
+    assert bot.lifecycle_fields("reset_now", 15, now_timestamp=100)["nextReset"] == 100 + 15 * 86400
+
+
+def test_new_admin_translations_have_matching_placeholders():
+    import string
+
+    from sui_bot.admin_tools import MESSAGES
+
+    for translations in MESSAGES.values():
+        assert len(translations) == 4
+        fields = [{field for _, field, _, _ in string.Formatter().parse(text) if field} for text in translations]
+        assert all(field == fields[0] for field in fields)
+
+
+@pytest.mark.asyncio
+async def test_error_handler_never_posts_to_channel(bot):
+    event = update()
+    event.effective_chat.type = "channel"
+    event.effective_user = None
+    await bot.error_handler(event, SimpleNamespace(error=ValueError("test error")))
+    event.effective_message.reply_text.assert_not_awaited()

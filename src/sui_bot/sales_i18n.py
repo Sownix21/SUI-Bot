@@ -236,6 +236,91 @@ MESSAGES = {
 }
 
 
+MESSAGES.update(
+    {
+        "custom_title": ("Custom subscription", "اشتراک دلخواه", "Индивидуальная подписка", "自定义订阅"),
+        "custom_config": (
+            "⚙️ Configure unit pricing",
+            "⚙️ تنظیم قیمت‌گذاری واحدی",
+            "⚙️ Настроить цену за единицу",
+            "⚙️ 设置单价",
+        ),
+        "custom_on": (
+            "Enable custom sales (shop turns off until re-enabled)",
+            "فعال‌سازی فروش دلخواه (فروشگاه نیاز به فعال‌سازی مجدد دارد)",
+            "Включить свободный выбор (магазин нужно включить снова)",
+            "启用自定义销售（需重新开启商店）",
+        ),
+        "custom_off": (
+            "Use preset plans (shop turns off until re-enabled)",
+            "استفاده از طرح‌های آماده (فروشگاه نیاز به فعال‌سازی مجدد دارد)",
+            "Использовать тарифы (магазин нужно включить снова)",
+            "使用预设套餐（需重新开启商店）",
+        ),
+        "custom_help": (
+            "Set a whole-number price per GB and/or day. Total = GB × GB rate + days × daily rate. A zero rate keeps that allowance fixed. GB uses the panel's 1024³-byte unit. No preset plans are needed. Automatic creation still requires admin-selected inbounds. /cancel",
+            "قیمت هر گیگابایت و/یا روز را به عدد صحیح وارد کنید. مبلغ کل برابر حجم ضرب‌در نرخ حجم، به‌علاوه روز ضرب‌در نرخ روزانه است. نرخ صفر یعنی مقدار آن بخش ثابت است. هر گیگابایت مطابق پنل ۱۰۲۴³ بایت است. نیازی به طرح آماده نیست؛ ساخت خودکار همچنان به انتخاب اینباند توسط مدیر نیاز دارد. /cancel",
+            "Укажите целую цену за ГБ и/или день. Итог = ГБ × цена за ГБ + дни × цена за день. Нулевая ставка фиксирует этот параметр. ГБ = 1024³ байт, как в панели. Тарифы не нужны; для автоматического создания администратор выбирает входящие подключения. /cancel",
+            "设置每 GB 和／或每天的整数价格。总价 = GB × 每GB价格 + 天数 × 每天价格。单价为零时该额度固定。GB 按面板的 1024³ 字节计算。不需要预设套餐；自动创建仍需要管理员选择入站。/cancel",
+        ),
+        "price_gb_prompt": (
+            "Price per GB in {currency} (0 = fixed quota):",
+            "قیمت هر گیگابایت به {currency} (۰ یعنی حجم ثابت):",
+            "Цена за ГБ в {currency} (0 = фиксированный объём):",
+            "每GB价格，单位 {currency}（0 = 固定流量）：",
+        ),
+        "price_day_prompt": (
+            "Price per day in {currency} (0 = fixed duration; at least one rate must be positive):",
+            "قیمت هر روز به {currency} (۰ یعنی مدت ثابت؛ حداقل یک نرخ باید مثبت باشد):",
+            "Цена за день в {currency} (0 = фиксированный срок; хотя бы одна ставка > 0):",
+            "每天价格，单位 {currency}（0 = 固定时长；至少一个单价大于0）：",
+        ),
+        "fixed_days_prompt": (
+            "Fixed duration in days (1–3650); ignored when daily pricing is enabled:",
+            "مدت ثابت به روز (۱ تا ۳۶۵۰)؛ در قیمت‌گذاری روزانه نادیده گرفته می‌شود:",
+            "Фиксированный срок в днях (1–3650); не используется при оплате за день:",
+            "固定天数（1–3650）；按天计价时忽略：",
+        ),
+        "fixed_volume_prompt": (
+            "Fixed whole GB (0 = unlimited); ignored when GB pricing is enabled:",
+            "حجم ثابت به گیگابایت صحیح (۰ یعنی نامحدود)؛ در قیمت‌گذاری حجمی نادیده گرفته می‌شود:",
+            "Фиксированный объём, целые ГБ (0 = безлимит); не используется при оплате за ГБ:",
+            "固定整数GB（0 = 不限）；按GB计价时忽略：",
+        ),
+        "max_gb_prompt": (
+            "Maximum GB a buyer may choose (1–1000000):",
+            "حداکثر حجم قابل خرید به گیگابایت (۱ تا ۱۰۰۰۰۰۰):",
+            "Максимум ГБ для покупки (1–1000000):",
+            "买家可选最大GB（1–1000000）：",
+        ),
+        "max_days_prompt": (
+            "Maximum days a buyer may choose (1–3650):",
+            "حداکثر مدت قابل خرید به روز (۱ تا ۳۶۵۰):",
+            "Максимум дней для покупки (1–3650):",
+            "买家可选最大天数（1–3650）：",
+        ),
+        "buy_gb": (
+            "Enter whole GB (1–{maximum}). Price: {rate} {currency}/GB. /cancel",
+            "حجم دلخواه را به گیگابایت صحیح وارد کنید (۱ تا {maximum}). قیمت هر گیگابایت: {rate} {currency}. /cancel",
+            "Введите целые ГБ (1–{maximum}). Цена: {rate} {currency}/ГБ. /cancel",
+            "输入整数GB（1–{maximum}）。每GB：{rate} {currency}。/cancel",
+        ),
+        "buy_days": (
+            "Enter days (1–{maximum}). Price: {rate} {currency}/day. /cancel",
+            "مدت دلخواه را به روز وارد کنید (۱ تا {maximum}). قیمت هر روز: {rate} {currency}. /cancel",
+            "Введите дни (1–{maximum}). Цена: {rate} {currency}/день. /cancel",
+            "输入天数（1–{maximum}）。每天：{rate} {currency}。/cancel",
+        ),
+        "custom_confirm": (
+            "Confirm price & pay",
+            "تأیید مبلغ و پرداخت",
+            "Подтвердить цену и оплатить",
+            "确认价格并付款",
+        ),
+    }
+)
+
+
 def sale_text(language: str, key: str, **values) -> str:
     index = LANGUAGES.index(language) if language in LANGUAGES else 0
     return MESSAGES[key][index].format(**values)

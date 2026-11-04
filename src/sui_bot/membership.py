@@ -264,13 +264,30 @@ class MembershipUI:
             raise ApplicationHandlerStop from None
 
     async def _guard(self, update, context):
-        if not update.effective_user or not update.effective_message:
-            return
+        if (
+            not update.effective_user
+            or not update.effective_message
+            or not update.effective_chat
+            or update.effective_chat.type != "private"
+        ):
+            raise ApplicationHandlerStop
         uid = update.effective_user.id
         if uid == self.b.ADMIN_TELEGRAM_ID:
             return
         query = update.callback_query
         action = query.data if query and isinstance(query.data, str) else ""
+        if not self.b.sales_store.data["enabled"] and not self.b.telegram_clients.get(uid):
+            if action.startswith("lang_set_"):
+                language = action.removeprefix("lang_set_")
+                if language in self.b.SUPPORTED_LANGUAGES:
+                    self.b.language_store.set(uid, language)
+            if query:
+                await self.b.localized_query_answer(query)
+            await update.effective_message.reply_text(
+                self.b.preserve_dynamic_text(self.t(uid, "inactive")),
+                reply_markup=self.b.language_keyboard(),
+            )
+            raise ApplicationHandlerStop
         check_clicked = action == "membership_check"
         if not self.store.data["enabled"]:
             if check_clicked:

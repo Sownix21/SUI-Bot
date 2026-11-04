@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from .connection_guides import validate_guide_data
 from .sales import validate_sales
 from .membership import validate_membership
+from .runtime_settings import alert_threshold
 
 BUNDLE_FORMAT = "sui-bot-backup"
 BUNDLE_VERSION = 1
@@ -31,6 +32,7 @@ STATE_KEYS = frozenset({
     "required_membership",
 })
 RUNTIME_SETTING_KEYS = frozenset({
+    "CPU_ALERT_THRESHOLD", "RAM_ALERT_THRESHOLD",
     "RENEWAL_MONTHLY_PRICE",
     "RENEWAL_MONTH_OPTIONS",
     "PAYMENT_CARD_NUMBER",
@@ -75,6 +77,9 @@ def _validate_state_entry(key: str, value: Any) -> None:
         except (TypeError, ValueError) as exc:
             raise ValueError("language preferences contain an invalid Telegram ID") from exc
     elif key == "runtime_settings":
+        for threshold in ("CPU_ALERT_THRESHOLD", "RAM_ALERT_THRESHOLD"):
+            if threshold in value:
+                alert_threshold(value[threshold])
         # Accept old bundles for migration only; never restore this retired option.
         if not isinstance(value, dict) or set(value) - (RUNTIME_SETTING_KEYS | {"HIDE_SUBSCRIPTION_PORT"}):
             raise ValueError("runtime settings contain unsupported keys")

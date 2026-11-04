@@ -15,12 +15,18 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ConversationHandler
 
-from .sales import OPEN_STATUSES, SalesStore, validate_plan
+from .sales import OPEN_STATUSES, SalesStore, custom_plan, validate_custom, validate_plan
 from .sales_i18n import sale_text
 
 SALES_INPUT = 1000
+CUSTOM_BUY_INPUT = 1001
 PLAN_FIELDS = ("title", "price", "days", "volume", "delayed", "reset_days", "group", "desc", "remark", "inbounds")
 ACCOUNT_FIELDS = ("name", "group", "desc", "remark", "inbounds")
+CUSTOM_FIELDS = ("price_gb", "price_day", "days", "volume", "max_gb", "max_days", "delayed", "inbounds")
+
+
+def wizard_fields(draft):
+    return {"plan": PLAN_FIELDS, "account": ACCOUNT_FIELDS, "custom": CUSTOM_FIELDS}[draft["kind"]]
 
 
 class SalesUI:
@@ -49,7 +55,7 @@ class SalesUI:
         return self.t(
             uid,
             "summary",
-            title=plan["title"],
+            title=self.t(uid, "custom_title") if "price_gb" in plan else plan["title"],
             days=plan["days"],
             volume=f"{plan['volume'] / 1024**3:g}",
             price=f"{plan['price']:,}",
@@ -61,6 +67,8 @@ class SalesUI:
         uid = update.effective_user.id
         data = self.store.data
         rows = [
+            [self.button(uid, "custom_config", "sales_a_custom_config")],
+            [self.button(uid, "custom_off" if data.get("custom_enabled") else "custom_on", "sales_a_custom_toggle")],
             [self.button(uid, "toggle", "sales_a_toggle")],
             [self.button(uid, "mode", "sales_a_mode")],
             [self.button(uid, "add", "sales_a_add")],
@@ -141,19 +149,65 @@ class SalesUI:
             return SALES_INPUT if context.user_data.get("sales_draft") else ConversationHandler.END
 
     async def _callback(self, update, context, uid, action):
+        if action.startswith("sales_custom_"):
+            return await self.custom_callback(update, context, action)
         if action.startswith("sales_w_"):
             return await self.wizard_callback(update, context, action)
         # A fresh entry replaces any abandoned sales editor.
         context.user_data.pop("sales_draft", None)
+        context.user_data.pop("custom_purchase", None)
         if action == "sales_admin":
             if uid != self.b.ADMIN_TELEGRAM_ID:
                 return ConversationHandler.END
+            await self.admin_menu(update)
+        elif action == "sales_a_custom_config":
+            data = copy.deepcopy(
+                self.store.data.get("custom")
+                or {
+                    "title": "Custom",
+                    "price": 1,
+                    "currency": self.b.PAYMENT_CURRENCY,
+                    "days": 30,
+                    "volume": 0,
+                    "delayed": True,
+                    "reset_days": 0,
+                    "active": True,
+                    "group": "",
+                    "desc": "",
+                    "remark": "",
+                    "inbounds": [],
+                    "price_gb": 0,
+                    "price_day": 0,
+                    "max_gb": 1000,
+                    "max_days": 365,
+                }
+            )
+            data["currency"] = self.b.PAYMENT_CURRENCY
+            context.user_data["sales_draft"] = {
+                "token": secrets.token_hex(4),
+                "kind": "custom",
+                "key": None,
+                "data": data,
+                "step": 0,
+            }
+            await self.say(update, self.t(uid, "custom_help"))
+            return await self.prompt(update, context)
+        elif action == "sales_a_custom_toggle":
+            enabled = not self.store.data.get("custom_enabled", False)
+            config = self.store.data.get("custom")
+            if enabled and (not config or (self.store.data["mode"] == "automatic" and not config["inbounds"])):
+                await self.say(update, self.t(uid, "ready"))
+            else:
+                # Turning off custom pricing must not expose an unconfigured shop.
+                self.store.configure(custom_enabled=enabled, enabled=False)
             await self.admin_menu(update)
         elif action in {"sales_a_toggle", "sales_a_mode"}:
             data = self.store.data
             enabled = not data["enabled"] if action.endswith("toggle") else data["enabled"]
             mode = ("automatic" if data["mode"] == "manual" else "manual") if action.endswith("mode") else data["mode"]
             active = [p for p in data["plans"].values() if p["active"]]
+            if data.get("custom_enabled"):
+                active = [data["custom"]]
             if enabled and (
                 not active
                 or not self.payment_ready()
@@ -237,6 +291,8 @@ class SalesUI:
                 await self.show_order(update, *existing)
             elif not self.store.data["enabled"] or not self.payment_ready():
                 await self.say(update, self.t(uid, "unavailable"))
+            elif self.store.data.get("custom_enabled"):
+                return await self.custom_callback(update, context, "sales_custom_start")
             else:
                 rows = [
                     [
@@ -294,6 +350,84 @@ class SalesUI:
         digits = re.sub(r"\D", "", self.b.PAYMENT_CARD_NUMBER)
         return len(digits) >= 8 and bool(set(digits) - {"0"})
 
+    async def custom_callback(self, update, context, action):
+        uid = update.effective_user.id
+        if not self.store.data["enabled"] or not self.store.data.get("custom_enabled") or not self.payment_ready():
+            raise ValueError("custom sales unavailable")
+        existing = self.store.open_order(uid)
+        if existing:
+            await self.show_order(update, *existing)
+            return ConversationHandler.END
+        if action == "sales_custom_start":
+            config = copy.deepcopy(self.store.data["custom"])
+            context.user_data["custom_purchase"] = {
+                "config": config,
+                "gb": config["volume"] // 1024**3,
+                "days": config["days"],
+                "fields": [f for f, rate in (("gb", "price_gb"), ("days", "price_day")) if config[rate]],
+                "token": secrets.token_hex(4),
+            }
+            return await self.custom_prompt(update, context)
+        draft = context.user_data.get("custom_purchase")
+        if not draft or draft["fields"] or action != "sales_custom_confirm_" + draft["token"]:
+            raise ValueError("stale quote")
+        key, order = self.store.checkout_custom(uid, draft["gb"], draft["days"], draft["config"])
+        order = self.store.update_order(
+            key, {"receipt"}, card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER
+        )
+        context.user_data.pop("custom_purchase", None)
+        context.user_data.pop("pending_renew_submission", None)
+        await self.show_order(update, key, order)
+        return ConversationHandler.END
+
+    async def custom_prompt(self, update, context):
+        draft = context.user_data["custom_purchase"]
+        uid, config = update.effective_user.id, draft["config"]
+        if draft["fields"]:
+            field = draft["fields"][0]
+            await self.say(
+                update,
+                self.t(
+                    uid,
+                    "buy_" + field,
+                    maximum=config["max_" + field],
+                    rate=config["price_gb" if field == "gb" else "price_day"],
+                    currency=config["currency"],
+                ),
+            )
+        else:
+            quote = custom_plan(config, draft["gb"], draft["days"])
+            quote["title"] = self.t(uid, "custom_title")
+            await self.say(
+                update,
+                self.summary(uid, quote),
+                [
+                    [self.button(uid, "custom_confirm", "sales_custom_confirm_" + draft["token"])],
+                    [self.button(uid, "cancel", "sales_shop")],
+                ],
+            )
+        return CUSTOM_BUY_INPUT
+
+    async def custom_text(self, update, context):
+        if update.effective_chat.type != "private":
+            return ConversationHandler.END
+        draft = context.user_data.get("custom_purchase")
+        try:
+            if not self.store.data["enabled"] or not self.store.data.get("custom_enabled") or not draft:
+                raise ValueError("unavailable")
+            if draft["config"] != self.store.data["custom"] or not draft["fields"]:
+                raise ValueError("stale quote")
+            field = draft["fields"][0]
+            value = int(update.message.text.strip())
+            if not 1 <= value <= draft["config"]["max_" + field]:
+                raise ValueError("out of range")
+            draft[field] = value
+            draft["fields"].pop(0)
+            return await self.custom_prompt(update, context)
+        except (ValueError, KeyError):
+            await self.say(update, self.t(update.effective_user.id, "invalid") + "\n/cancel")
+            return CUSTOM_BUY_INPUT
+
     async def begin_account(self, update, context, key, order):
         if order["status"] != "approved" or order["mode"] != "manual":
             raise ValueError("not awaiting setup")
@@ -311,7 +445,7 @@ class SalesUI:
     async def prompt(self, update, context, *, update_keyboard=False):
         draft = context.user_data["sales_draft"]
         uid = update.effective_user.id
-        fields = PLAN_FIELDS if draft["kind"] == "plan" else ACCOUNT_FIELDS
+        fields = wizard_fields(draft)
         field = fields[draft["step"]]
         prefix = f"sales_w_{draft['token']}_"
         rows = []
@@ -341,6 +475,8 @@ class SalesUI:
                 rows.append([self.button(uid, "blank", prefix + "blank")])
         rows.append([self.button(uid, "cancel", "sales_admin")])
         prompt_key = "reset_prompt" if field == "reset_days" else field + "_prompt"
+        if draft["kind"] == "custom" and field in {"days", "volume"}:
+            prompt_key = "fixed_" + prompt_key
         text = self.t(uid, prompt_key, currency=draft["data"]["currency"])
         if draft.get("key") and field != "inbounds":
             value = draft["data"].get(field, "")
@@ -367,13 +503,20 @@ class SalesUI:
         draft = context.user_data.get("sales_draft")
         if not draft:
             return ConversationHandler.END
-        fields = PLAN_FIELDS if draft["kind"] == "plan" else ACCOUNT_FIELDS
+        fields = wizard_fields(draft)
         field = fields[draft["step"]]
         raw = update.message.text.strip()
         try:
             if field == "inbounds":
                 raise ValueError("use buttons")
-            if field in {"price", "days", "reset_days"}:
+            if field in {"price_gb", "price_day", "max_gb", "max_days"}:
+                value = int(raw)
+                low, high = (0, 10**9) if field.startswith("price_") else (1, 1000000 if field == "max_gb" else 3650)
+                if not low <= value <= high:
+                    raise ValueError("invalid unit pricing")
+                if field == "price_day" and not value and not draft["data"]["price_gb"]:
+                    raise ValueError("at least one rate required")
+            elif field in {"price", "days", "reset_days"}:
                 value = int(raw)
                 low, high = (1, 10**15) if field == "price" else (0 if field == "reset_days" else 1, 3650)
                 if not low <= value <= high or (field == "reset_days" and value and draft["data"]["delayed"]):
@@ -383,6 +526,8 @@ class SalesUI:
                 if not number.is_finite() or not 0 <= number <= Decimal(10**18) / 1024**3:
                     raise ValueError("invalid volume")
                 value = int(number * 1024**3)
+                if draft["kind"] == "custom" and number != int(number):
+                    raise ValueError("whole GB required")
             elif field == "delayed":
                 if raw not in {"0", "1"}:
                     raise ValueError("invalid boolean")
@@ -408,7 +553,7 @@ class SalesUI:
         if not draft or not action.startswith(f"sales_w_{draft['token']}_"):
             raise ValueError("stale wizard")
         choice = action.removeprefix(f"sales_w_{draft['token']}_")
-        fields = PLAN_FIELDS if draft["kind"] == "plan" else ACCOUNT_FIELDS
+        fields = wizard_fields(draft)
         field = fields[draft["step"]]
         if choice == "create" and draft.get("confirmed"):
             key = draft["key"]
@@ -433,6 +578,12 @@ class SalesUI:
                     raise ValueError("stale inbound")
                 if not selected and (draft["kind"] == "account" or self.store.data["mode"] == "automatic"):
                     raise ValueError("empty inbound preset")
+                if draft["kind"] == "custom":
+                    validate_custom(draft["data"])
+                    self.store.configure(custom=copy.deepcopy(draft["data"]))
+                    context.user_data.pop("sales_draft", None)
+                    await self.admin_menu(update)
+                    return ConversationHandler.END
                 if draft["kind"] == "plan":
                     self.store.save_plan(draft["data"], draft["key"])
                     context.user_data.pop("sales_draft", None)

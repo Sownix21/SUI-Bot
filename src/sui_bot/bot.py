@@ -54,9 +54,10 @@ from .reporting import (
     load_expired_notification_ids,
     save_expired_notification_ids,
 )
-from .runtime_settings import load_runtime_settings, save_runtime_setting
+from .runtime_settings import alert_threshold, load_runtime_settings, save_runtime_setting
+from .admin_tools import ALERT_INPUT, AdminTools
 from .sales import SalesStore
-from .sales_ui import SALES_INPUT, SalesUI
+from .sales_ui import CUSTOM_BUY_INPUT, SALES_INPUT, SalesUI
 from .membership import MEMBERSHIP_INPUT, MembershipStore, MembershipUI
 from .security import can_access_client, is_public_callback, validate_service_url
 from .localization import LanguageStore, SUPPORTED_LANGUAGES, translate
@@ -169,14 +170,15 @@ try:
 except (OSError, ValueError) as exc:
     raise RuntimeError("Cannot load required_membership.json; check permissions or restore a valid bot backup") from exc
 membership_ui = MembershipUI(sys.modules[__name__], membership_store)
+admin_tools = AdminTools(sys.modules[__name__])
 
 # Inbounds cache constants
 INBOUNDS_CACHE_FILE = managed_data_path("inbounds_cache.json")
 INBOUNDS_CACHE_DURATION = 24 * 60 * 60  # 24 hours
 
 # Alert system constants
-CPU_ALERT_THRESHOLD = 90
-RAM_ALERT_THRESHOLD = 85
+CPU_ALERT_THRESHOLD = alert_threshold(RUNTIME_SETTINGS.get("CPU_ALERT_THRESHOLD", 90))
+RAM_ALERT_THRESHOLD = alert_threshold(RUNTIME_SETTINGS.get("RAM_ALERT_THRESHOLD", 85))
 ALERT_COOLDOWN = 120  # 2 minutes between alerts
 MONITOR_INTERVAL = 30  # Check every 30 seconds
 MIN_USERNAME_LEN = 3
@@ -1487,6 +1489,7 @@ def build_payment_settings_keyboard():
 
 def build_admin_tools_settings_keyboard():
     return InlineKeyboardMarkup([
+        [admin_tools.button("alerts", "tools_alerts")],
         [membership_ui.button(ADMIN_TELEGRAM_ID, "title", "membership_admin")],
         [InlineKeyboardButton(tr(ADMIN_TELEGRAM_ID, "set_display_name"), callback_data='settings_set_display_name')],
         [InlineKeyboardButton("🕐 Set Administrative Timezone", callback_data='settings_timezone')],
@@ -1502,6 +1505,7 @@ def build_admin_tools_settings_keyboard():
 
 def build_backup_restore_keyboard():
     return InlineKeyboardMarkup([
+        [admin_tools.button("backup", "tools_backup")],
         [InlineKeyboardButton("📤 Create & Send Backup", callback_data='settings_backup_create')],
         [InlineKeyboardButton("📥 Restore Instructions", callback_data='settings_backup_help')],
         [InlineKeyboardButton("🔙 Back", callback_data='settings_admin_tools')],
@@ -1630,7 +1634,7 @@ async def send_state_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 def reload_restored_state() -> None:
     global inbounds_cache, RENEWAL_MONTHLY_PRICE, RENEWAL_MONTH_OPTIONS
     global PAYMENT_CARD_NUMBER, PAYMENT_CARD_HOLDER, BOT_DISPLAY_NAME, WEB_PANEL_ENABLED
-    global ADMIN_TIMEZONE, PAYMENT_CURRENCY
+    global ADMIN_TIMEZONE, PAYMENT_CURRENCY, CPU_ALERT_THRESHOLD, RAM_ALERT_THRESHOLD
     global renewal_month_options
     load_assignments()
     language_store.load()
@@ -1642,6 +1646,8 @@ def reload_restored_state() -> None:
     load_cached_sub_uri()
     inbounds_cache = load_cached_inbounds()
     restored_settings = load_runtime_settings(RUNTIME_SETTINGS_FILE)
+    CPU_ALERT_THRESHOLD = alert_threshold(restored_settings.get("CPU_ALERT_THRESHOLD", 90))
+    RAM_ALERT_THRESHOLD = alert_threshold(restored_settings.get("RAM_ALERT_THRESHOLD", 85))
     RUNTIME_SETTINGS.clear()
     RUNTIME_SETTINGS.update(restored_settings)
     RENEWAL_MONTHLY_PRICE = int(restored_settings.get("RENEWAL_MONTHLY_PRICE", SETTINGS.renewal_monthly_price))
@@ -2064,6 +2070,8 @@ async def settings_monthly_price_input(update: Update, context: ContextTypes.DEF
 
 def get_main_menu_keyboard(is_admin=False, user_id: int | None = None):
     uid = user_id if user_id is not None else ADMIN_TELEGRAM_ID
+    if uid != ADMIN_TELEGRAM_ID and not sales_store.data["enabled"] and not telegram_clients.get(uid):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(tr(uid, "language"), callback_data='language_settings')]])
     subscription_key = "my_subscriptions" if has_multiple_subscriptions(telegram_clients, uid) else "my_subscription"
     keyboard = [[InlineKeyboardButton(tr(uid, subscription_key), callback_data='my_usage')]]
     if sales_store.data["enabled"] or sales_store.open_order(uid):
@@ -2883,6 +2891,21 @@ async def sales_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @rate_limited(admin_only=True)
 async def sales_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await sales_ui.text(update, context)
+
+
+@rate_limited(admin_only=False)
+async def custom_sales_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await sales_ui.custom_text(update, context)
+
+
+@rate_limited(admin_only=True)
+async def admin_tools_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_tools.callback(update, context)
+
+
+@rate_limited(admin_only=True)
+async def admin_tools_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_tools.text(update, context)
 
 
 @rate_limited(admin_only=True)
@@ -4531,6 +4554,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             msg += "⚙️ SING-BOX\n"
             msg += f"Status: {'✅ Running' if sbd_running else '❌ Stopped'}\n"
+            msg += f"Maintenance mode: {'Enabled (intentional stop)' if sbd.get('maintenance') else 'Disabled'}\n"
             msg += f"⏱️ Uptime: {format_duration(sbd_uptime)}\n"
             msg += f"🧵 Goroutines: {sbd_goroutines:,}\n"
             msg += f"💾 Heap: {format_bytes(sbd_alloc)}\n\n"
@@ -5849,7 +5873,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         metrics.record_error(update.effective_user.id)
     if network_error:
         return
-    if update and update.effective_message:
+    if (update and update.effective_user and update.effective_message
+            and update.effective_chat and update.effective_chat.type == "private"):
         try:
             await update.effective_message.reply_text("❌ Unexpected Error , Please Contact Admin")
         except TelegramError as exc:
@@ -6160,7 +6185,7 @@ async def check_resource_alerts(app, cpu_percent, ram_percent):
             await send_alert(app, 'cpu', cpu_percent)
             alert_state['cpu_alert_sent'] = current_time
             alert_state['cpu_recovered'] = False
-    elif not alert_state['cpu_recovered'] and cpu_percent < (CPU_ALERT_THRESHOLD - 10):
+    elif not alert_state['cpu_recovered'] and cpu_percent <= max(0, CPU_ALERT_THRESHOLD - 10):
         # CPU recovered (10% below threshold to prevent flapping)
         await send_recovery(app, 'cpu', cpu_percent)
         alert_state['cpu_recovered'] = True
@@ -6171,7 +6196,7 @@ async def check_resource_alerts(app, cpu_percent, ram_percent):
             await send_alert(app, 'ram', ram_percent)
             alert_state['ram_alert_sent'] = current_time
             alert_state['ram_recovered'] = False
-    elif not alert_state['ram_recovered'] and ram_percent < (RAM_ALERT_THRESHOLD - 10):
+    elif not alert_state['ram_recovered'] and ram_percent <= max(0, RAM_ALERT_THRESHOLD - 10):
         # RAM recovered (10% below threshold to prevent flapping)
         await send_recovery(app, 'ram', ram_percent)
         alert_state['ram_recovered'] = True
@@ -6270,6 +6295,7 @@ async def main():
         # abandoned editor (for example, display-name settings) from consuming
         # text intended for a newly started create/edit workflow.
         entry_points=[
+            CallbackQueryHandler(admin_tools_callback, pattern='^tools_(alerts|CPU|RAM|backup)$'),
             CallbackQueryHandler(membership_callback, pattern='^membership_(admin|add|toggle|remove_-?[0-9]+)$'),
             CommandHandler('start', start),
             CallbackQueryHandler(sales_callback, pattern='^sales_'),
@@ -6292,6 +6318,8 @@ async def main():
             ),
         ],
         states={
+            ALERT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_tools_text)],
+            CUSTOM_BUY_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_sales_text)],
             MEMBERSHIP_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, membership_input)],
             SALES_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sales_text)],
             CREATE_USER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_user_name)],

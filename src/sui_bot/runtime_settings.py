@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 ALLOWED_KEYS = {
+    "CPU_ALERT_THRESHOLD", "RAM_ALERT_THRESHOLD",
     "RENEWAL_MONTHLY_PRICE",
     "RENEWAL_MONTH_OPTIONS",
     "PAYMENT_CARD_NUMBER",
@@ -21,6 +22,12 @@ ALLOWED_KEYS = {
 }
 
 
+def alert_threshold(value: Any) -> int:
+    if isinstance(value, bool) or not str(value).isdigit() or not 1 <= int(value) <= 100:
+        raise ValueError("Alert threshold must be an integer from 1 to 100")
+    return int(value)
+
+
 def load_runtime_settings(path: str = "runtime_settings.json") -> dict[str, Any]:
     source = Path(path)
     if not source.is_file():
@@ -28,12 +35,17 @@ def load_runtime_settings(path: str = "runtime_settings.json") -> dict[str, Any]
     data = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise RuntimeError("runtime settings must be a JSON object")
+    for key in ("CPU_ALERT_THRESHOLD", "RAM_ALERT_THRESHOLD"):
+        if key in data:
+            alert_threshold(data[key])
     return {key: value for key, value in data.items() if key in ALLOWED_KEYS}
 
 
 def save_runtime_setting(name: str, value: str, path: str = "runtime_settings.json") -> None:
     if name not in ALLOWED_KEYS:
         raise ValueError(f"Refusing to persist secret or unsupported setting: {name}")
+    if name in {"CPU_ALERT_THRESHOLD", "RAM_ALERT_THRESHOLD"}:
+        alert_threshold(value)
     destination = Path(path)
     data = load_runtime_settings(path)
     data[name] = value

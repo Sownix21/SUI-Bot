@@ -30,6 +30,8 @@ def store(tmp_path):
 def ui(store):
     b = SimpleNamespace(
         ADMIN_TELEGRAM_ID=1,
+        sales_store=SimpleNamespace(data={"enabled": True}),
+        telegram_clients={},
         language_store=SimpleNamespace(get=Mock(return_value="en"), set=Mock()),
         SUPPORTED_LANGUAGES={"en", "fa", "ru", "zh"},
         preserve_dynamic_text=lambda value: value,
@@ -259,6 +261,45 @@ async def test_real_application_dispatch_blocks_before_other_groups_and_outgoing
     await app.process_update(update)
     first.assert_awaited_once()
     second.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [None, "connection_guides", "sales_shop", "membership_check", "lang_set_fa"])
+async def test_private_unassigned_users_only_get_language_and_inactive_notice(ui, action):
+    ui.b.sales_store.data["enabled"] = False
+    update, context = event(action=action), ctx()
+    with pytest.raises(ApplicationHandlerStop):
+        await ui.guard(update, context)
+    context.bot.get_chat_member.assert_not_awaited()
+    ui.b.get_main_menu_keyboard.assert_not_called()
+    assert "not active" in update.effective_message.reply_text.await_args.args[0]
+    assert update.effective_message.reply_text.await_args.kwargs["reply_markup"] is ui.b.language_keyboard.return_value
+    if action == "lang_set_fa":
+        ui.b.language_store.set.assert_called_once_with(42, "fa")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chat_type,has_user", [("channel", False), ("channel", True), ("supergroup", True), ("group", True)]
+)
+async def test_channel_and_group_updates_silently_stop(ui, chat_type, has_user):
+    update, context = event(uid=1), ctx()
+    update.effective_chat.type = chat_type
+    if not has_user:
+        update.effective_user = None
+    with pytest.raises(ApplicationHandlerStop):
+        await ui.guard(update, context)
+    update.effective_message.reply_text.assert_not_awaited()
+    context.bot.get_chat_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_assigned_users_still_pass_membership(ui):
+    ui.b.sales_store.data["enabled"] = False
+    ui.b.telegram_clients[42] = [9]
+    update, context = event(), ctx()
+    await ui.guard(update, context)
+    assert context.bot.get_chat_member.await_count == 2
 
 
 def test_membership_backup_round_trip(store, tmp_path):

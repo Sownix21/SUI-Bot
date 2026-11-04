@@ -9,11 +9,13 @@ A Telegram bot for managing S-UI users, subscriptions, renewals, and subscriptio
 - **Subscription management:** usage, expiry, subscription links, and multiple subscriptions per Telegram account.
 - **Admin tools:** create, edit, delete, and assign clients; view online users, server status, and activity reports. Interactive assignment is available alongside `/assign`.
 - **Public sales:** optional storefront with admin-defined plans, prices, durations, quotas, and inbound presets. Every receipt requires admin approval; accounts can then be configured manually or created automatically and assigned to the buyer.
+- **Custom-priced subscriptions:** sell by GB, by day, or both without creating preset plans. Buyers choose quantities and confirm the calculated price before paying.
 - **Required membership:** optionally require users to join your channels or groups before using the bot, without interrupting outgoing reminders or broadcasts.
 - **Renewals & reminders:** receipt-based renewal approval, expiry alerts with renewal buttons, and an expired-subscription notification.
 - **Four languages:** English, Persian, Russian, and Chinese, selected independently by each user. Commands and server-provided content remain unchanged.
 - **Personalization:** message display name, payment details, currency, administrative timezone, and editable connection guides with text, videos, images, and files. The display name does not change the bot's BotFather name or username.
 - **Backups:** scheduled panel database backups and an admin-only bot backup/restore feature.
+- **Resource alerts:** change CPU and RAM warning thresholds directly in Telegram.
 - **Linux management:** a global `sui-bot` menu for service control, logs, configuration, updates, optional web-panel setup, and uninstallation.
 
 ## 📋 Requirements
@@ -42,6 +44,8 @@ Open the bot in Telegram, send `/start`, and select your language. The configure
 
 Admin access and VPN subscriptions are separate. A fresh installation does **not** assume any panel client belongs to the admin. To show your own subscription, explicitly assign it using the assignment menu or `/assign <your Telegram ID> <client ID>`. Updates preserve existing assignments; review and unlink any incorrect assignment from an older installation.
 
+When public sales are off, unassigned users receive an unavailable notice and can only choose their language—not view guides or receive join prompts. Bot interactions take place in private chats; channel posts and group messages are ignored. Outgoing broadcasts and reminders are unaffected.
+
 ## 📢 Required channels & groups
 
 Open **Settings → Administration → Required channels/groups**. This feature is off by default.
@@ -51,6 +55,8 @@ Open **Settings → Administration → Required channels/groups**. This feature 
 3. Enable the requirement. New and existing users must join **all** listed chats, then press **I joined**. A pending join request is not membership yet.
 
 Until verified, users cannot view subscriptions, buy, renew, or submit receipts. They can still choose their language and receive broadcasts and reminders. The administrator is exempt. Membership is checked again on subsequent interactions; if Telegram cannot verify it, access stays blocked until verification succeeds. Users should resend any command or receipt they submitted while blocked.
+
+In private mode, users without an assignment are denied access before membership is checked.
 
 ## 🛒 Set up public sales
 
@@ -69,6 +75,18 @@ Buyers submit receipt images in a private chat. Review them using the approval b
 Sale plans and renewal pricing are separate. Configure renewal prices and durations in payment settings as well.
 
 If creation cannot be confirmed, use **Check creation** in the order. The bot will not blindly create another account. If it remains unresolved, check S-UI and coordinate with the buyer before taking further action.
+
+### 🧮 Sell by GB or duration
+
+In **Settings → Public sales → Configure unit pricing**, set a whole-number price per GB, per day, or both in your configured currency. A zero rate fixes that dimension: for example, a GB rate with a zero daily rate sells variable traffic with a fixed duration. Set fixed allowances, purchase limits, validity start, and inbounds in the setup wizard. A fixed traffic allowance of zero means unlimited; paid traffic is always at least 1 GB. GB follows the panel's 1024³-byte unit.
+
+With both rates enabled, **total = GB × GB price + days × daily price**. Buyers enter whole quantities, review the total, and confirm before submitting a receipt. Quotes are rejected if pricing changes before confirmation; submitted orders keep their original price and allowances.
+
+Enable custom sales, then re-enable the shop after checking payment details and creation mode. Switching between custom pricing and preset plans turns sales off as a safety check. No preset plans are needed in custom mode, but automatic account creation still requires admin-selected inbounds. Manual creation lets the admin select inbounds after approval. Custom subscriptions do not use periodic traffic resets.
+
+## ⚠️ Resource alerts
+
+Use **Settings → Administration → CPU / RAM alert thresholds** to set each warning percentage from 1 to 100. These monitor the VPS running the bot. Changes apply immediately, survive restarts, and are included in bot backups.
 
 ## ⏳ Expiry, resets & renewals
 
@@ -115,6 +133,8 @@ Updates preserve the managed configuration and bot data; **you do not need to mo
 ## 💾 Backups & important data
 
 In Telegram, use **Settings → Administration → Backup & Restore** to receive a bot backup. To restore it, send `/restore` and upload that file as the administrator.
+
+The same menu has **Download panel backup now** for an on-demand S-UI database file, alongside the existing bot-state backup. Panel backups contain sensitive panel data; keep them private and restore them through S-UI, not the bot's `/restore` command.
 
 Bot backups include assignments, settings, languages, guides, metrics, sales plans/orders, and required-membership settings. **They do not replace the separate S-UI database backup**, and exclude the live bot and panel API tokens. Keep them private: they still contain customer and payment information and private invitation links. Restore matching bot/panel backups carefully; an older order ledger may not reflect accounts created afterwards.
 

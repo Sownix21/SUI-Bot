@@ -15,6 +15,42 @@ STATUSES = OPEN_STATUSES | {"fulfilled", "rejected", "cancelled"}
 MAX_SALES_BYTES = 8 * 1024 * 1024
 
 
+def validate_custom(config: dict) -> None:
+    validate_plan(config)
+    if config["volume"] % 1024**3 or config["reset_days"]:
+        raise ValueError("custom sales require whole GB and no periodic resets")
+    for key, low, high in (
+        ("price_gb", 0, 10**9),
+        ("price_day", 0, 10**9),
+        ("max_gb", 1, 1000000),
+        ("max_days", 1, 3650),
+    ):
+        if type(config.get(key)) is not int or not low <= config[key] <= high:
+            raise ValueError("invalid custom pricing")
+    if not config["price_gb"] and not config["price_day"]:
+        raise ValueError("at least one unit rate is required")
+
+
+def custom_plan(config: dict, gb: int, days: int) -> dict:
+    validate_custom(config)
+    if type(gb) is not int or type(days) is not int:
+        raise ValueError("whole units required")
+    if config["price_gb"]:
+        if not 1 <= gb <= config["max_gb"]:
+            raise ValueError("GB outside allowed range")
+    elif gb * 1024**3 != config["volume"]:
+        raise ValueError("fixed quota changed")
+    if config["price_day"]:
+        if not 1 <= days <= config["max_days"]:
+            raise ValueError("days outside allowed range")
+    elif days != config["days"]:
+        raise ValueError("fixed duration changed")
+    plan = copy.deepcopy(config)
+    plan.update(price=gb * config["price_gb"] + days * config["price_day"], volume=gb * 1024**3, days=days)
+    validate_plan(plan)
+    return plan
+
+
 def validate_plan(plan: dict) -> None:
     if not isinstance(plan, dict):
         raise ValueError("invalid plan")
@@ -49,6 +85,12 @@ def validate_sales(data: dict) -> None:
         raise ValueError("invalid sales state")
     if data.get("mode") not in {"manual", "automatic"}:
         raise ValueError("invalid fulfilment mode")
+    if type(data.get("custom_enabled", False)) is not bool:
+        raise ValueError("invalid custom pricing flag")
+    if data.get("custom") is not None:
+        validate_custom(data["custom"])
+    if data.get("custom_enabled") and not data.get("custom"):
+        raise ValueError("custom pricing is not configured")
     plans, orders = data.get("plans"), data.get("orders")
     if not isinstance(plans, dict) or len(plans) > 24 or not isinstance(orders, dict) or len(orders) > 2000:
         raise ValueError("sales capacity exceeded")
@@ -149,14 +191,24 @@ class SalesStore:
         return None
 
     def checkout(self, user_id: int, plan_id: str) -> tuple[str, dict]:
+        if self.data.get("custom_enabled"):
+            raise ValueError("preset sales are disabled in custom mode")
+        plan = self.data["plans"].get(plan_id)
+        if not plan or not plan["active"]:
+            raise ValueError("plan unavailable")
+        return self._checkout_plan(user_id, plan)
+
+    def checkout_custom(self, user_id: int, gb: int, days: int, quoted_config: dict) -> tuple[str, dict]:
+        if not self.data.get("custom_enabled") or self.data.get("custom") != quoted_config:
+            raise ValueError("pricing changed; request a new quote")
+        return self._checkout_plan(user_id, custom_plan(quoted_config, gb, days))
+
+    def _checkout_plan(self, user_id: int, plan: dict) -> tuple[str, dict]:
         if not self.data["enabled"]:
             raise ValueError("sales disabled")
         existing = self.open_order(user_id)
         if existing:
             return existing
-        plan = self.data["plans"].get(plan_id)
-        if not plan or not plan["active"]:
-            raise ValueError("plan unavailable")
         if self.data["mode"] == "automatic" and not plan["inbounds"]:
             raise ValueError("missing inbound preset")
         now = int(time.time())
