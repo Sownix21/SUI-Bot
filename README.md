@@ -6,6 +6,8 @@ A Telegram bot for managing S-UI users, subscriptions, renewals, and subscriptio
 
 ## ✨ Features
 
+On S-UI 1.6.8 the main subscription link automatically serves the format requested by supported clients, including Happ, sing-box and Clash. The bot skips paused inbounds for new selections and checks sale inbounds again before provisioning. Existing clients keep their paused assignments when edited.
+
 - **Subscription management:** usage, expiry, subscription links, and multiple subscriptions per Telegram account.
 - **Admin tools:** create, edit, delete, and assign clients; view online users, server status, and activity reports. Interactive assignment is available alongside `/assign`.
 - **Public sales:** optional storefront with admin-defined plans, prices, durations, quotas, and inbound presets. Every receipt requires admin approval; accounts can then be configured manually or created automatically and assigned to the buyer.

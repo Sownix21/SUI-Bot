@@ -190,20 +190,20 @@ class SalesStore:
                 return key, copy.deepcopy(order)
         return None
 
-    def checkout(self, user_id: int, plan_id: str) -> tuple[str, dict]:
+    def checkout(self, user_id: int, plan_id: str, *, card: str = "", holder: str = "") -> tuple[str, dict]:
         if self.data.get("custom_enabled"):
             raise ValueError("preset sales are disabled in custom mode")
         plan = self.data["plans"].get(plan_id)
         if not plan or not plan["active"]:
             raise ValueError("plan unavailable")
-        return self._checkout_plan(user_id, plan)
+        return self._checkout_plan(user_id, plan, card, holder)
 
-    def checkout_custom(self, user_id: int, gb: int, days: int, quoted_config: dict) -> tuple[str, dict]:
+    def checkout_custom(self, user_id: int, gb: int, days: int, quoted_config: dict, *, card: str = "", holder: str = "") -> tuple[str, dict]:
         if not self.data.get("custom_enabled") or self.data.get("custom") != quoted_config:
             raise ValueError("pricing changed; request a new quote")
-        return self._checkout_plan(user_id, custom_plan(quoted_config, gb, days))
+        return self._checkout_plan(user_id, custom_plan(quoted_config, gb, days), card, holder)
 
-    def _checkout_plan(self, user_id: int, plan: dict) -> tuple[str, dict]:
+    def _checkout_plan(self, user_id: int, plan: dict, card: str, holder: str) -> tuple[str, dict]:
         if not self.data["enabled"]:
             raise ValueError("sales disabled")
         existing = self.open_order(user_id)
@@ -227,6 +227,8 @@ class SalesStore:
             "notified": False,
         }
         data["orders"][key] = order
+        if card:
+            order.update(card=card, holder=holder)
         self.commit(data)
         return key, copy.deepcopy(order)
 

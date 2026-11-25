@@ -382,9 +382,10 @@ async def test_manual_purchase_complete_flow(bot, store, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_removed_inbound_prevents_automatic_creation(bot, store, monkeypatch):
+@pytest.mark.parametrize("inbounds", [[], [{"id": 9, "enable": False}]])
+async def test_removed_inbound_prevents_automatic_creation(bot, store, monkeypatch, inbounds):
     key = approved(store)
-    monkeypatch.setattr(bot.api_client, "get", AsyncMock(return_value={"success": True, "obj": {"inbounds": []}}))
+    monkeypatch.setattr(bot.api_client, "get", AsyncMock(return_value={"success": True, "obj": {"inbounds": inbounds}}))
     monkeypatch.setattr(bot, "create_or_edit_client", AsyncMock())
     with pytest.raises(ValueError, match="inbound"):
         await bot.sales_ui.fulfil(update(), context(), key)
@@ -607,6 +608,23 @@ def test_private_menu_contains_only_language(bot, store):
     bot.telegram_clients[42] = [9]
     markup = bot.get_main_menu_keyboard(False, 42)
     assert "my_usage" in [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+def test_paused_inbound_available_only_for_existing_assignment(bot, monkeypatch):
+    monkeypatch.setattr(bot, "inbounds_cache", [{"id": 1}, {"id": 2, "enable": False}])
+    create = bot.create_inbounds_keyboard()
+    edit = bot.create_inbounds_keyboard([2], prefix="edit_inbound")
+    assert "inbound_1" in {row[0].callback_data for row in create}
+    assert "inbound_2" not in {row[0].callback_data for row in create}
+    assert any(row[0].callback_data == "edit_inbound_2" and "⏸" in row[0].text for row in edit)
+
+
+def test_checkout_persists_original_payment_with_order(store):
+    plan_id = store.save_plan(plan())
+    store.configure(enabled=True)
+    key, _ = store.checkout(42, plan_id, card="example", holder="test")
+    assert SalesStore(store.path).data["orders"][key]["card"] == "example"
+    assert store.checkout(42, plan_id, card="changed")[1]["card"] == "example"
 
 
 def test_latest_panel_client_edit_and_renewal_contract(bot):

@@ -3,7 +3,6 @@ import json
 import os
 import tempfile
 import glob
-import shutil
 import threading
 import base64
 import secrets
@@ -71,6 +70,8 @@ from .outgoing_localization import (
 )
 from .sui_metadata import (
     build_subscription_urls,
+    inbound_enabled,
+    inbound_metadata,
     build_web_panel_url,
     extract_load_metadata,
     extract_partial_metadata,
@@ -317,13 +318,7 @@ class MetricsTracker:
                 'total_commands': self.metrics['total_commands'],
                 'start_time': self.metrics['start_time']
             }
-            with io_lock:
-                with tempfile.NamedTemporaryFile('w', delete=False, dir='.') as tmp:
-                    json.dump(data, tmp, indent=2)
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                    tmp_name = tmp.name
-                shutil.move(tmp_name, METRICS_FILE)
+            atomic_json_write(METRICS_FILE, data)
         except Exception as e:
             logger.error(f"Failed to save metrics: {e}")
 
@@ -970,11 +965,11 @@ def atomic_json_write(filepath: str, data: dict):
     try:
         with io_lock:
             with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(filepath) or '.') as tmp:
+                tmp_name = tmp.name
                 json.dump(data, tmp, indent=2)
                 tmp.flush()
                 os.fsync(tmp.fileno())
-                tmp_name = tmp.name
-            shutil.move(tmp_name, filepath)
+            os.replace(tmp_name, filepath)
     except Exception as e:
         logger.error(f"Failed to write {filepath}: {e}")
         if 'tmp_name' in locals() and os.path.exists(tmp_name):
@@ -1061,7 +1056,7 @@ def load_cached_inbounds():
                     cache = json.load(f)
                     inbounds_cache_time = cache.get("timestamp", 0)
                     logger.info("Loaded cached inbounds")
-                    return cache.get("inbounds", [])
+                    return inbound_metadata(cache.get("inbounds", []))
         except Exception as e:
             logger.error(f"Failed to load inbounds cache: {e}")
     return []
@@ -1110,15 +1105,19 @@ async def refresh_server_metadata() -> bool:
 
 
 async def get_inbounds_list(force_refresh=False):
-    global inbounds_cache
+    global inbounds_cache, inbounds_cache_time
     now = datetime.now().timestamp()
 
     if not force_refresh and inbounds_cache is not None and (now - inbounds_cache_time) < INBOUNDS_CACHE_DURATION:
         return inbounds_cache
 
     try:
-        if await refresh_server_metadata():
-            return inbounds_cache or []
+        obj = sui_response_object(await api_client.get("apiv2/inbounds"))
+        if obj is not None:
+            inbounds_cache = inbound_metadata(obj.get("inbounds"))
+            inbounds_cache_time = now
+            save_cached_inbounds(inbounds_cache)
+            return inbounds_cache
     except Exception as e:
         logger.error(f"Failed to fetch S-UI metadata: {e}")
 
@@ -1152,6 +1151,8 @@ def create_inbounds_keyboard(selected_inbounds=None, prefix="inbound"):
 
     for inbound in inbounds:
         inbound_id = inbound.get("id")
+        if not inbound_enabled(inbound) and inbound_id not in selected_inbounds:
+            continue
         tag = inbound.get("tag", f"Inbound {inbound_id}")
         port = inbound.get("listen_port", "")
 
@@ -1162,6 +1163,8 @@ def create_inbounds_keyboard(selected_inbounds=None, prefix="inbound"):
 
         if inbound_id in selected_inbounds:
             display_text = "✅ " + display_text
+        if not inbound_enabled(inbound):
+            display_text = "⏸ " + display_text
 
         keyboard.append([InlineKeyboardButton(display_text, callback_data=f'{prefix}_{inbound_id}')])
 
@@ -1196,13 +1199,10 @@ async def refresh_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     # Show loading message
     await query.edit_message_text("⏳ Updating SUB Link & Inbounds...")
 
-    # Refresh subscription URL
-    new_uri = await get_subscription_base_url(force_refresh=True)
-
-    # Refresh inbounds list
-    inbounds = await get_inbounds_list(force_refresh=True)
-
-    if inbounds:
+    refreshed = await refresh_server_metadata()
+    new_uri = sub_base_url or "—"
+    inbounds = get_current_inbounds()
+    if refreshed:
         inbound_count = len(inbounds)
         inbound_names = ", ".join([get_inbound_display_name(inbound.get("id")) for inbound in inbounds[:3]])
         if inbound_count > 3:
@@ -2460,6 +2460,7 @@ async def create_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CREATE_USER_NAME
     context.user_data['new_client_name'] = name
 
+    await get_inbounds_list()
     keyboard = create_inbounds_keyboard([], prefix="inbound")
     context.user_data['selected_inbounds'] = []
     await update.message.reply_text(
@@ -2480,7 +2481,7 @@ async def create_user_inbound_callback(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
     if data == 'inbound_all':
         inbounds = get_current_inbounds()
-        context.user_data['selected_inbounds'] = [inbound.get("id") for inbound in inbounds]
+        context.user_data['selected_inbounds'] = [i["id"] for i in inbounds if inbound_enabled(i)]
         selected_text = "✅ All Inbounds Selected."
     elif data == 'inbound_done':
         if not context.user_data.get('selected_inbounds'):
@@ -2501,8 +2502,12 @@ async def create_user_inbound_callback(update: Update, context: ContextTypes.DEF
         )
         return CREATE_USER_VOLUME
     elif data.startswith('inbound_'):
-        inbound_id = int(data.split('_')[1])
+        if not data.removeprefix('inbound_').isdigit():
+            return CREATE_USER_INBOUNDS
+        inbound_id = int(data.removeprefix('inbound_'))
         selected = context.user_data.get('selected_inbounds', [])
+        if inbound_id not in selected and not any(i["id"] == inbound_id and inbound_enabled(i) for i in get_current_inbounds()):
+            return CREATE_USER_INBOUNDS
         if inbound_id in selected:
             selected.remove(inbound_id)
             selected_text = f"❌ Inbound {get_inbound_display_name(inbound_id)} Removed."
@@ -3023,6 +3028,7 @@ async def edit_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['edited_client_name'] = name
 
+    await get_inbounds_list()
     keyboard = create_inbounds_keyboard(context.user_data.get('edited_selected_inbounds', []), prefix="edit_inbound")
     selected_count = len(context.user_data.get('edited_selected_inbounds', []))
     await update.message.reply_text(
@@ -3045,7 +3051,8 @@ async def edit_user_inbound_callback(update: Update, context: ContextTypes.DEFAU
         return ConversationHandler.END
     elif data == 'edit_inbound_all':
         inbounds = get_current_inbounds()
-        context.user_data['edited_selected_inbounds'] = [inbound.get("id") for inbound in inbounds]
+        selected = context.user_data.get('edited_selected_inbounds', [])
+        context.user_data['edited_selected_inbounds'] = list(dict.fromkeys([*selected, *(i["id"] for i in inbounds if inbound_enabled(i))]))
         selected_text = "✅ All Inbounds Selected."
     elif data == 'edit_inbound_done':
         if not context.user_data.get('edited_selected_inbounds'):
@@ -3071,8 +3078,12 @@ async def edit_user_inbound_callback(update: Update, context: ContextTypes.DEFAU
         )
         return EDIT_USER_VOLUME
     elif data.startswith('edit_inbound_'):
-        inbound_id = int(data.split('_')[2])
+        if not data.removeprefix('edit_inbound_').isdigit():
+            return EDIT_USER_INBOUNDS
+        inbound_id = int(data.removeprefix('edit_inbound_'))
         selected = context.user_data.get('edited_selected_inbounds', [])
+        if inbound_id not in selected and not any(i["id"] == inbound_id and inbound_enabled(i) for i in get_current_inbounds()):
+            return EDIT_USER_INBOUNDS
         if inbound_id in selected:
             selected.remove(inbound_id)
             selected_text = f"❌ Inbound {get_inbound_display_name(inbound_id)} Removed."
@@ -4141,9 +4152,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             msg = (
                 f"{tr(user_id, 'subscription_links')}\n\n"
-                f"🌐 Main URL (V2rayNG & ETC):\n<code>{html.escape(main_url)}</code>\n\n"
-                f"📄 JSON (Sing-Box & Karing APP):\n<code>{html.escape(json_url)}</code>\n\n"
-                f"⚔️ Clash (Only MI Clash APP):\n<code>{html.escape(clash_url)}</code>\n\n"
+                f"🌐 {tr(user_id, 'subscription_url_label')}:\n<code>{html.escape(main_url)}</code>\n\n"
+                f"📄 JSON (sing-box):\n<code>{html.escape(json_url)}</code>\n\n"
+                f"⚔️ Clash / Mihomo:\n<code>{html.escape(clash_url)}</code>\n\n"
                 f"{tr(user_id, 'use_links')}"
             )
             keyboard = [[InlineKeyboardButton(tr(user_id, "back"), callback_data=f'select_sub_{client_id}')]]
@@ -4553,6 +4564,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"✍️ Write: {format_bytes(dio_write)}\n\n"
 
             msg += "⚙️ SING-BOX\n"
+            if sys_info.get("coreVersion"):
+                msg += f"Version: {sys_info['coreVersion']}\n"
             msg += f"Status: {'✅ Running' if sbd_running else '❌ Stopped'}\n"
             msg += f"Maintenance mode: {'Enabled (intentional stop)' if sbd.get('maintenance') else 'Disabled'}\n"
             msg += f"⏱️ Uptime: {format_duration(sbd_uptime)}\n"

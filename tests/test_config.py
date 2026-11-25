@@ -27,6 +27,17 @@ def test_runtime_settings_reject_invalid_renewal_months(monkeypatch: pytest.Monk
         Settings.from_env()
 
 
+@pytest.mark.parametrize("prefix", ["../backup", "backups/*", "Sui[123]", r"..\unsafe"])
+def test_retention_uses_literal_backup_prefix(monkeypatch, prefix):
+    monkeypatch.setenv("SUI_HOST", "https://panel.example.com")
+    monkeypatch.setenv("SUI_TOKEN", "test-token")
+    monkeypatch.setenv("BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyz_ABCD")
+    monkeypatch.setenv("ADMIN_TELEGRAM_ID", "1")
+    monkeypatch.setenv("DB_NAME", prefix)
+    with pytest.raises(RuntimeError, match="DB_NAME"):
+        Settings.from_env()
+
+
 def test_display_name_accepts_unicode_but_rejects_control_characters() -> None:
     assert validate_display_name("  سرویس من  ") == "سرویس من"
     with pytest.raises(RuntimeError, match="BOT_DISPLAY_NAME"):

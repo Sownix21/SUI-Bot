@@ -17,6 +17,7 @@ from telegram.ext import ConversationHandler
 
 from .sales import OPEN_STATUSES, SalesStore, custom_plan, validate_custom, validate_plan
 from .sales_i18n import sale_text
+from .sui_metadata import inbound_enabled, inbound_metadata
 
 SALES_INPUT = 1000
 CUSTOM_BUY_INPUT = 1001
@@ -127,6 +128,12 @@ class SalesUI:
             if int(time.time()) - order["created"] > 1800:
                 await self.say(update, self.t(uid, "expired", id=key), self.order_rows(uid, key, order))
                 return
+            if not order.get("card"):
+                # Older versions wrote the order and its payment details separately.
+                if not self.payment_ready():
+                    await self.say(update, self.t(uid, "unavailable"), self.order_rows(uid, key, order))
+                    return
+                order = self.store.update_order(key, {"receipt"}, card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER)
             text = html.escape(text) + "\n\n" + self.b.copyable_ltr_code(order["card"])
             text += "\n" + html.escape(order.get("holder", "")) + "\n" + html.escape(self.t(uid, "tap"))
             text += "\n\n" + html.escape(self.t(uid, "pay"))
@@ -308,11 +315,8 @@ class SalesUI:
         elif action.startswith("sales_buy_"):
             if not self.payment_ready():
                 raise ValueError("payment details missing")
-            key, order = self.store.checkout(uid, action.removeprefix("sales_buy_"))
-            if "card" not in order:
-                order = self.store.update_order(
-                    key, {"receipt"}, card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER
-                )
+            key, order = self.store.checkout(uid, action.removeprefix("sales_buy_"),
+                                             card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER)
             context.user_data.pop("pending_renew_submission", None)
             await self.show_order(update, key, order)
         elif action.startswith("sales_cancel_"):
@@ -371,10 +375,8 @@ class SalesUI:
         draft = context.user_data.get("custom_purchase")
         if not draft or draft["fields"] or action != "sales_custom_confirm_" + draft["token"]:
             raise ValueError("stale quote")
-        key, order = self.store.checkout_custom(uid, draft["gb"], draft["days"], draft["config"])
-        order = self.store.update_order(
-            key, {"receipt"}, card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER
-        )
+        key, order = self.store.checkout_custom(uid, draft["gb"], draft["days"], draft["config"],
+                                                card=self.b.PAYMENT_CARD_NUMBER, holder=self.b.PAYMENT_CARD_HOLDER)
         context.user_data.pop("custom_purchase", None)
         context.user_data.pop("pending_renew_submission", None)
         await self.show_order(update, key, order)
@@ -452,7 +454,11 @@ class SalesUI:
         if field == "inbounds":
             # Keep a stable list for this picker; toggles/pages need no panel request.
             if "inbound_options" not in draft:
-                draft["inbound_options"] = await self.b.get_inbounds_list(force_refresh=True)
+                options = await self.b.get_inbounds_list(force_refresh=True)
+                draft["inbound_options"] = [i for i in options if inbound_enabled(i)]
+                available = {i["id"] for i in draft["inbound_options"]}
+                # Retired inbound IDs must be replaceable when editing an old preset.
+                draft["data"]["inbounds"] = [i for i in draft["data"]["inbounds"] if i in available]
             inbounds = draft["inbound_options"]
             draft["allowed_inbounds"] = [int(i["id"]) for i in inbounds]
             page = min(max(0, draft.get("page", 0)), max(0, (len(inbounds) - 1) // 15))
@@ -677,7 +683,7 @@ class SalesUI:
             response = self.b.sui_response_object(await self.b.api_client.get("apiv2/inbounds"))
             if not response or not isinstance(response.get("inbounds"), list):
                 raise ValueError("cannot validate inbounds")
-            available = {i["id"] for i in response["inbounds"] if isinstance(i, dict) and "id" in i}
+            available = {i["id"] for i in inbound_metadata(response["inbounds"]) if inbound_enabled(i)}
             if not plan["inbounds"] or not set(plan["inbounds"]) <= available:
                 raise ValueError("inbound no longer exists")
             clients = self.b.sui_clients(await self.b.api_client.get("apiv2/clients"))

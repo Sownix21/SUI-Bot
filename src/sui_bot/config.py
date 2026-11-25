@@ -149,6 +149,11 @@ class Settings:
         return settings
 
     def validate(self) -> None:
+        # Used both as a filename prefix and in the backup retention glob.
+        if not self.db_name or len(self.db_name) > 128 or any(
+            not (char.isalnum() or char in " _.-") for char in self.db_name
+        ) or self.db_name in {".", ".."}:
+            raise RuntimeError("DB_NAME must be a plain backup filename prefix")
         positive = {
             "ADMIN_TELEGRAM_ID": self.admin_telegram_id,
             "BACKUP_MAX_BYTES": self.backup_max_bytes,

@@ -655,6 +655,11 @@ GUIDE_AND_EXPIRY_TRANSLATIONS: dict[str, dict[str, str]] = {
 for _language, _messages in GUIDE_AND_EXPIRY_TRANSLATIONS.items():
     TRANSLATIONS[_language].update(_messages)
 
+for _language, _label in {
+    "en": "Subscription URL", "fa": "لینک اشتراک", "ru": "Ссылка подписки", "zh": "订阅链接",
+}.items():
+    TRANSLATIONS[_language]["subscription_url_label"] = _label
+
 for _language, _text in {
     "en": "Delay start cannot be enabled after the account has traffic, matching the panel. Choose standard expiry or periodic reset instead.",
     "fa": "مطابق پنل، پس از ثبت مصرف نمی‌توان شروع تأخیری را فعال کرد. انقضای عادی یا بازنشانی دوره‌ای را انتخاب کنید.",

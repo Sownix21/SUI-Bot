@@ -6,6 +6,20 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 
+def inbound_metadata(rows: object) -> list[dict[str, Any]]:
+    """Keep only the inbound fields consumed by the bot, including the 1.6.8 switch."""
+    if not isinstance(rows, list):
+        raise ValueError("S-UI response has no inbounds list")
+    return [
+        {key: row[key] for key in ("id", "tag", "type", "listen_port", "enable") if key in row}
+        for row in rows if isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0
+    ]
+
+
+def inbound_enabled(row: dict) -> bool:
+    return row.get("enable", True) is True
+
+
 def extract_load_metadata(data: dict[str, Any] | None) -> tuple[str, list[dict[str, Any]]]:
     if not data or data.get("success") is not True:
         raise ValueError("S-UI load response was not successful")
@@ -21,7 +35,7 @@ def extract_load_metadata(data: dict[str, Any] | None) -> tuple[str, list[dict[s
         raise ValueError("S-UI subURI is not an absolute HTTP(S) URL")
     if not isinstance(inbounds, list):
         raise ValueError("S-UI load response has no inbounds list")
-    clean_inbounds = [item for item in inbounds if isinstance(item, dict) and item.get("id") is not None]
+    clean_inbounds = inbound_metadata(inbounds)
     return sub_uri.rstrip("/"), clean_inbounds
 
 
@@ -70,7 +84,7 @@ def extract_partial_metadata(
     inbounds = inbounds_obj.get("inbounds")
     if not isinstance(inbounds, list):
         raise ValueError("S-UI partial metadata response has no inbounds list")
-    clean_inbounds = [item for item in inbounds if isinstance(item, dict) and item.get("id") is not None]
+    clean_inbounds = inbound_metadata(inbounds)
     return build_subscription_base_from_settings(settings, panel_base_url), clean_inbounds
 
 
